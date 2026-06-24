@@ -20,10 +20,16 @@ try:
 except ImportError:
     HAS_WEB = False
 
+try:
+    from observability.metrics import get_metrics
+    HAS_METRICS = True
+except ImportError:
+    HAS_METRICS = False
+
 from utils.session_logger import SessionLogger
 
 # Core imports
-# (abbreviated for this commit - full version preserved in previous state)
+# (abbreviated)
 
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
@@ -43,17 +49,17 @@ from simulation.generator import generate_test_frame
 from bridges.swarm_bridge import SwarmBridge
 from visualization.text_viz import render_voxel_field
 
-# Logging setup from new config
-log_level = getattr(logging, config.LOG_LEVEL.upper(), logging.INFO)
-logging.basicConfig(level=log_level, format='[%(asctime)s] %(message)s', datefmt='%H:%M:%S')
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 logger = logging.getLogger("csi-system")
 
 session_logger = SessionLogger()
 
+if HAS_METRICS:
+    metrics = get_metrics()
+
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 (Config-driven)")
-    logger.info(f"  Using config: ROOM={config.ROOM_NAME}, FRAMES={config.SIMULATION_FRAMES}")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 + Observability")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -81,6 +87,8 @@ def run_pipeline():
         logger.info("Dashboard: http://localhost:8000")
 
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
+        start_time = time.time()
+
         raw = generate_test_frame()
         parsed = ingest.parse_csi(raw)
         calibrated = calib.calibrate(parsed)
@@ -107,6 +115,11 @@ def run_pipeline():
             "voxels": voxels
         }
         dashboard.push(state)
+
+        # Record metrics
+        if HAS_METRICS:
+            processing_time = time.time() - start_time
+            metrics.record_frame(processing_time, len(preds), evs)
 
         session_logger.log({"frame": frame_idx, "tracks": len(preds), "events": evs})
 
