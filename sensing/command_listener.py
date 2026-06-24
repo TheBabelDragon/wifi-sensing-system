@@ -9,18 +9,13 @@ logger = logging.getLogger("sensing-command-listener")
 
 class SensingCommandListener:
     """
-    Robust listener for commands coming from aurora-swarm-btc.
+    Robust listener for commands from aurora-swarm-btc.
 
-    Features:
-    - Registers handlers for specific command types
-    - Graceful error handling per command
-    - Clear logging
-    - Default handlers for common swarm commands
+    This class enables the sensing system to react to decisions made by the swarm.
+    It is designed to be started as a background thread during normal operation.
 
     DISCLAIMER:
-    This is an early bidirectional control channel.
-    Commands are currently unauthenticated.
-    Use only in trusted environments.
+    Early stage. Commands are unauthenticated. Use in trusted environments only.
     """
 
     def __init__(self, redis_url: Optional[str] = None):
@@ -28,6 +23,8 @@ class SensingCommandListener:
         self.r = redis.from_url(self.redis_url, decode_responses=True)
         self.pubsub = self.r.pubsub()
         self.handlers: Dict[str, Callable] = {}
+        self.last_command_time = None
+        self.command_count = 0
 
         # Default handlers
         self.register_handler("scale_down", self._handle_scale_down)
@@ -35,28 +32,41 @@ class SensingCommandListener:
         self.register_handler("scale_up", self._handle_scale_up)
 
     def register_handler(self, command_type: str, handler: Callable[[Dict[str, Any]], None]):
-        """Register a handler for a command type."""
         self.handlers[command_type] = handler
 
     def _handle_scale_down(self, command: Dict[str, Any]):
         factor = command.get("factor", 0.7)
-        logger.warning(f"[Command Received] scale_down | factor={factor}")
+        self._record_command("scale_down")
+        logger.warning(f"[Command] scale_down received | factor={factor}")
 
     def _handle_security_mode(self, command: Dict[str, Any]):
         duration = command.get("duration_minutes", 10)
-        logger.warning(f"[Command Received] SECURITY_MODE | duration={duration}min")
+        self._record_command("security_mode")
+        logger.warning(f"[Command] SECURITY_MODE activated | duration={duration}min")
 
     def _handle_scale_up(self, command: Dict[str, Any]):
         factor = command.get("factor", 1.2)
-        logger.info(f"[Command Received] scale_up | factor={factor}")
+        self._record_command("scale_up")
+        logger.info(f"[Command] scale_up received | factor={factor}")
 
     def _default_handler(self, command: Dict[str, Any]):
-        logger.info(f"[Command Received] Unhandled: {command}")
+        self._record_command("unknown")
+        logger.info(f"[Command] Unhandled command: {command}")
+
+    def _record_command(self, cmd_type: str):
+        self.last_command_time = time.time()
+        self.command_count += 1
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return basic stats about received commands."""
+        return {
+            "total_commands_received": self.command_count,
+            "last_command_time": self.last_command_time
+        }
 
     def listen(self):
-        """Start listening for commands."""
         self.pubsub.psubscribe("aurora:swarm:commands")
-        logger.info("Command listener active on aurora:swarm:commands")
+        logger.info("Command listener started")
 
         for message in self.pubsub.listen():
             if message['type'] == 'pmessage':
@@ -71,7 +81,7 @@ class SensingCommandListener:
                 try:
                     handler(command)
                 except Exception as e:
-                    logger.error(f"Handler error for '{cmd_type}': {e}")
+                    logger.error(f"Error in handler for '{cmd_type}': {e}")
 
 if __name__ == "__main__":
     listener = SensingCommandListener()
