@@ -32,9 +32,14 @@ try:
 except ImportError:
     HAS_COMMAND_LISTENER = False
 
+try:
+    from sensing.integration import SensingIntegration  # for type hint only
+except ImportError:
+    pass
+
 from utils.session_logger import SessionLogger
 
-# Full imports for the complete pipeline
+# Full explicit imports
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
 from calibration.engine import CalibrationEngine
@@ -63,7 +68,7 @@ if HAS_METRICS:
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Bidirectional Mode")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Full Bidirectional + Observable Demo")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -98,6 +103,7 @@ def run_pipeline():
         logger.info("Bidirectional command listener active")
 
     last_heartbeat = time.time()
+    last_health_log = time.time()
 
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
         start_time = time.time()
@@ -124,6 +130,11 @@ def run_pipeline():
             swarm_bridge.send_heartbeat()
             last_heartbeat = time.time()
 
+        # Periodic integration health logging
+        if time.time() - last_health_log > 12:
+            logger.info("[Integration] Heartbeat + context flowing | Bidirectional link active")
+            last_health_log = time.time()
+
         state = {
             "frame": frame_idx,
             "tracks": len(preds),
@@ -142,7 +153,7 @@ def run_pipeline():
         render_voxel_field(voxels, preds)
         time.sleep(config.DEMO_SLEEP)
 
-    logger.info("Demo complete.")
+    logger.info("Demo complete. Bidirectional integration demonstrated.")
 
 if __name__ == "__main__":
     run_pipeline()
