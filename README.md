@@ -1,14 +1,15 @@
 # WiFi CSI Spatial Intelligence System v1.1.0
 
-**Fully working system** that sends rich structured context to aurora-swarm-btc and triggers real reactions.
+**Production-oriented system** with centralized YAML + environment configuration.
 
-## Current State
+## Configuration
 
-- Hardened ESP32 nodes
-- Strong intelligence stack
-- Rich structured data sharing (tracks, events, memory, spatial)
-- Swarm can react with real actions (scale power, security mode, etc.)
-- Live central dashboard + session logging
+Configure via `config.yaml` or environment variables (env vars take precedence).
+
+Example:
+```bash
+SIMULATION_FRAMES=12 ROOM_NAME=lab python run_full_pipeline.py
+```
 
 ## Quick Start
 
@@ -19,4 +20,4 @@ pip install -r requirements.txt
 python run_full_pipeline.py
 ```
 
-Open http://localhost:8000 to see everything live.
+Open http://localhost:8000 for the live dashboard.
