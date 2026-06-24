@@ -32,11 +32,6 @@ try:
 except ImportError:
     HAS_COMMAND_LISTENER = False
 
-try:
-    from sensing.integration import SensingIntegration  # for type hint only
-except ImportError:
-    pass
-
 from utils.session_logger import SessionLogger
 
 # Full explicit imports
@@ -68,7 +63,7 @@ if HAS_METRICS:
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Full Bidirectional + Observable Demo")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Full Observable Bidirectional Demo")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -95,15 +90,17 @@ def run_pipeline():
         threading.Thread(target=start_web, daemon=True).start()
         logger.info("Dashboard: http://localhost:8000")
 
+    command_listener = None
     if HAS_COMMAND_LISTENER:
         def start_listener():
-            listener = SensingCommandListener(redis_url=config.REDIS_URL)
-            listener.listen()
+            nonlocal command_listener
+            command_listener = SensingCommandListener(redis_url=config.REDIS_URL)
+            command_listener.listen()
         threading.Thread(target=start_listener, daemon=True).start()
         logger.info("Bidirectional command listener active")
 
     last_heartbeat = time.time()
-    last_health_log = time.time()
+    last_status_log = time.time()
 
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
         start_time = time.time()
@@ -130,10 +127,14 @@ def run_pipeline():
             swarm_bridge.send_heartbeat()
             last_heartbeat = time.time()
 
-        # Periodic integration health logging
-        if time.time() - last_health_log > 12:
-            logger.info("[Integration] Heartbeat + context flowing | Bidirectional link active")
-            last_health_log = time.time()
+        # Periodic status logging for integration health
+        if time.time() - last_status_log > 15:
+            if command_listener:
+                stats = command_listener.get_stats()
+                logger.info(f"[Integration] Healthy | Commands received: {stats['total_commands_received']}")
+            else:
+                logger.info("[Integration] Bidirectional link active")
+            last_status_log = time.time()
 
         state = {
             "frame": frame_idx,
@@ -153,7 +154,7 @@ def run_pipeline():
         render_voxel_field(voxels, preds)
         time.sleep(config.DEMO_SLEEP)
 
-    logger.info("Demo complete. Bidirectional integration demonstrated.")
+    logger.info("Demo complete.")
 
 if __name__ == "__main__":
     run_pipeline()
