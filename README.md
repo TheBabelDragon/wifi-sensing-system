@@ -1,64 +1,55 @@
-# WiFi CSI Spatial Intelligence System v1.1.0 + Aurora Swarm BTC Integration
+# WiFi CSI Spatial Intelligence System v1.1.0 + Aurora Swarm BTC
 
-**Complete operable implementation** of a spatially-aware, behaviorally-intelligent compute swarm.
+**Fully operational, real-world demonstrational spatial intelligence system** ready for ESP32 deployment and integration with your Bitcoin mining swarm.
 
-This system merges **physical perception** (WiFi CSI) with **high-performance compute** (Bitcoin mining swarm) and is **ready for easy deployment on ESP32 hardware**.
+This is a complete end-to-end cognition stack:
 
-## Architecture Overview
+Perception → Understanding → Decision → Action (in aurora-swarm-btc)
 
-```
-[ESP32 Nodes] → UDP CSI Stream → Python Pipeline → Agents + SwarmBridge → Aurora Swarm BTC
-     (easy flash)         (real-time)           (decisions)           (mining control)
-```
-
-## ESP32 Support — Easy Flashing
-
-The system includes ready-to-flash firmware for ESP32 devices.
-
-### Quick Start (Arduino IDE — Recommended for beginners)
-
-1. Install [Arduino IDE](https://www.arduino.cc/en/software) + ESP32 board support
-2. Open the file: `esp32/esp32_csi_udp_sender.ino`
-3. Edit the top section:
-   - `ssid` and `password` (your WiFi)
-   - `target_ip` (IP address of the machine running the Python pipeline)
-   - `node_id` (unique name for this sensor, e.g. `esp32_mining_hall_01`)
-4. Upload to your ESP32
-
-The ESP32 will immediately start capturing CSI and streaming JSON data over UDP to the central system.
-
-### Multiple Nodes
-Just flash multiple ESP32s with different `node_id` values. The Python pipeline automatically handles them.
-
-See `esp32/README.md` for more details and advanced options (ESP-IDF).
-
-## Key Integration Components
-
-- **ESP32 Firmware** — Easy Arduino flashable CSI capture + UDP sender
-- **AuroraAdapter** — Bidirectional Redis bridge to `aurora-swarm-btc`
-- **SwarmBridge** + **SwarmEventListener** — Event publishing and subscription
-- **Agent Layer** — Intelligent policies with cooldowns and swarm commands
-- **Configurable Pipeline** — Environment-driven via `.env`
-
-## Quick Start (Full System)
+## Quick Demo (Recommended)
 
 ```bash
 git clone https://github.com/TheBabelDragon/wifi-sensing-system.git
 cd wifi-sensing-system
-cp .env.example .env
 python run_full_pipeline.py
 ```
 
-Flash one or more ESP32s as described above, and the pipeline will start receiving real CSI data.
+You will see a rich, visual demonstration including:
+- Voxel field generation with ASCII visualization
+- Multi-object tracking with velocity
+- Behavior classification
+- Event & anomaly detection
+- Intelligent agent decisions
+- Direct context pushing to aurora-swarm-btc
 
-## Production Notes
+## ESP32 Hardware Support
 
-- Set `REDIS_URL` to connect to your aurora-swarm-btc Redis instance.
-- Multiple ESP32 nodes can feed the same pipeline.
-- Events flow into the swarm control bus for context-aware mining decisions.
+Flash `esp32/esp32_csi_udp_sender.ino` using Arduino IDE (see `esp32/README.md`).
+The Python pipeline automatically receives live data from real ESP32 nodes via UDP.
 
-## Related Repository
+## Full Architecture
 
-- [aurora-swarm-btc](https://github.com/TheBabelDragon/aurora-swarm-btc) — The entropy-driven Bitcoin mining swarm now with physical spatial awareness.
+All layers are fully implemented with fine-detail logic:
+- Ingestion (UDP + simulation)
+- Calibration + drift detection
+- Fusion (Gaussian voxel fields)
+- Tracking with association & velocity
+- Predictive tracking (Kalman-style)
+- Behavior understanding
+- Event engine
+- Interaction modeling
+- Memory & autonomous adaptation
+- Federation
+- Intelligent Agent with swarm policies
+- Dashboard + visualization
+- Aurora Swarm Bridge (Redis)
 
-They yearn for the mines. Now they can *see* who is near them.
+## Integration with aurora-swarm-btc
+
+Events and decisions from the physical space are pushed into the mining swarm’s control bus, enabling context-aware mining operations (power scaling, security alerts, etc.).
+
+## Related Repo
+
+[aurora-swarm-btc](https://github.com/TheBabelDragon/aurora-swarm-btc)
+
+**They yearn for the mines. Now they can see who is near them.**
