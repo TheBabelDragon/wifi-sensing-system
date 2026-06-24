@@ -1,5 +1,8 @@
 import socket
 import json
+import logging
+
+logger = logging.getLogger("csi-ingestor")
 
 class CSIIngestor:
     def __init__(self, udp_port: int = 4210):
@@ -8,29 +11,29 @@ class CSIIngestor:
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(("0.0.0.0", self.udp_port))
-            self.sock.settimeout(1.0)
-            print(f"[CSIIngestor] Listening for ESP32 CSI on UDP port {self.udp_port}")
+            self.sock.settimeout(0.8)
+            logger.info(f"Listening for ESP32 CSI on UDP port {self.udp_port}")
         except Exception as e:
-            print(f"[CSIIngestor] UDP setup failed (simulation mode): {e}")
+            logger.warning(f"UDP listener failed to start: {e} (running in simulation mode)")
 
     def read_packet(self):
         if self.sock:
             try:
-                data, addr = self.sock.recvfrom(1024)
+                data, addr = self.sock.recvfrom(2048)
                 return json.loads(data.decode())
             except socket.timeout:
                 return None
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Packet receive error: {e}")
                 return None
         return None
 
     def parse_csi(self, packet):
         if packet is None:
-            # Fallback simulation
             return {
-                "node": "simulated_esp32",
-                "csi": [0.5] * 32,
-                "rssi": -55,
+                "node": "simulated",
+                "csi": [0.4] * 32,
+                "rssi": -58,
                 "timestamp": "sim"
             }
         return {
@@ -43,8 +46,4 @@ class CSIIngestor:
     def stream(self):
         while True:
             packet = self.read_packet()
-            if packet:
-                yield self.parse_csi(packet)
-            else:
-                # Yield simulated data if no real packet
-                yield self.parse_csi(None)
+            yield self.parse_csi(packet)
