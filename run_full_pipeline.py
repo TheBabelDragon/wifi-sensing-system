@@ -23,7 +23,7 @@ except ImportError:
 from utils.session_logger import SessionLogger
 
 # Core imports
-# ... (imports remain)
+# (imports stay the same for brevity)
 
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
@@ -50,8 +50,8 @@ session_logger = SessionLogger()
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence System v1.1.0")
-    logger.info("  Sending rich structured context to aurora-swarm-btc")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Full Rich Integration Demo")
+    logger.info("  Sending rich context + Swarm reactions enabled")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -76,7 +76,7 @@ def run_pipeline():
         def start_web():
             uvicorn.run(web_app, host="0.0.0.0", port=8000, log_level="warning")
         threading.Thread(target=start_web, daemon=True).start()
-        logger.info("Central dashboard: http://localhost:8000")
+        logger.info("Dashboard: http://localhost:8000")
 
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
         raw = generate_test_frame()
@@ -89,20 +89,14 @@ def run_pipeline():
         evs = events.generate(preds)
 
         memory.update({"tracks": preds, "events": evs})
-        params = adaptation.adjust({"error": round(0.1 + frame_idx * 0.03, 2)})
 
         if evs:
             decision = agent.decide({"tracks": preds, "events": evs})
             agent.execute(decision)
 
-        # Send rich structured context to the swarm
-        if frame_idx % 2 == 0:
-            swarm_bridge.send_full_context(
-                tracks=preds,
-                events=evs,
-                behaviors=behaviors,
-                memory_profile=memory.room_profile
-            )
+        # Send rich context frequently so swarm reactions are visible
+        if frame_idx % 2 == 0 or len(preds) >= 2:
+            swarm_bridge.send_full_context(preds, evs, behaviors, memory.room_profile)
 
         state = {
             "frame": frame_idx,
@@ -118,7 +112,7 @@ def run_pipeline():
         render_voxel_field(voxels, preds)
         time.sleep(config.DEMO_SLEEP)
 
-    logger.info("\nSession complete. Rich context was sent to the swarm.")
+    logger.info("\nDemo complete. Rich context + swarm reactions demonstrated.")
 
 if __name__ == "__main__":
     run_pipeline()
