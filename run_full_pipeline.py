@@ -1,5 +1,13 @@
 import sys
 sys.path.append('.')
+import os
+
+# Optional: load .env if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
@@ -21,8 +29,11 @@ from bridges.swarm_bridge import SwarmBridge
 def run_pipeline():
     print("\n🚀 WiFi CSI Spatial Intelligence + Aurora Swarm BTC — Full Integrated Pipeline\n")
 
-    # Initialize everything
-    aurora = AuroraAdapter()
+    redis_url = os.getenv("REDIS_URL")
+    room_name = os.getenv("SENSING_ROOM_NAME", "mining_hall")
+
+    # Initialize with Redis support
+    aurora = AuroraAdapter(redis_url=redis_url)
     ingest = CSIIngestor()
     calib = CalibrationEngine()
     fusion = FusionEngine()
@@ -36,15 +47,16 @@ def run_pipeline():
     federation = Federation()
     agent = Agent()
     dashboard = DashboardServer()
-    swarm_bridge = SwarmBridge()
+    swarm_bridge = SwarmBridge(redis_url=redis_url)
 
-    # Aurora swarm connection test
-    aurora.register_node("esp32_mining_hall_01", {"pos": (0,0), "type": "sensing"})
+    aurora.register_node("esp32_mining_hall_01", {"pos": (0,0), "type": "sensing", "room": room_name})
     print("Aurora health:", aurora.health_report())
     print("Swarm bridge status:", swarm_bridge.get_swarm_status())
 
-    print("\n--- Running 5 integrated frames ---")
-    for i in range(5):
+    num_frames = int(os.getenv("SIMULATION_FRAMES", 5))
+    print(f"\n--- Running {num_frames} integrated frames ---")
+
+    for i in range(num_frames):
         print(f"\n=== Frame {i+1} ===")
         frame = generate_test_frame()
         
@@ -61,17 +73,17 @@ def run_pipeline():
         metrics = {"error": 0.1 + i * 0.05}
         params = adaptation.adjust(metrics)
         
-        # === NEW: Swarm Integration ===
-        if "ROOM_OCCUPIED" in ev or "RAPID_MOVEMENT" in ev:
+        # Swarm integration
+        if any(e in ev for e in ["ROOM_OCCUPIED", "RAPID_MOVEMENT", "ANOMALY"]):
             decision = agent.decide({"tracks": preds, "events": ev})
             agent.execute(decision)
         
-        # Push thermal/occupancy context to swarm
         if len(preds) > 0:
-            swarm_bridge.send_thermal_context(avg_temp_proxy=0.6 + i*0.05)
+            swarm_bridge.send_thermal_context(avg_temp_proxy=round(0.6 + i*0.05, 2))
 
         state = {
             "frame": i+1,
+            "room": room_name,
             "tracks": len(preds),
             "events": ev,
             "behavior": states,
