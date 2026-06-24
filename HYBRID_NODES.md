@@ -1,75 +1,91 @@
-# Hybrid Node Architecture (LoRa + Meshtastic + PoE)
+# Hybrid Node Architecture (WiFi CSI + LoRa/Meshtastic + PoE)
 
-This document outlines how the WiFi CSI Spatial Intelligence System supports mixed/hybrid node deployments, including LoRa (via Meshtastic) and PoE-based nodes.
+**Stage 1 Document** — Foundation and Architecture
 
-## Goals
-- Support long-range / off-grid deployments using LoRa
-- Allow mixed environments (WiFi CSI nodes + LoRa mesh nodes + PoE nodes)
-- Keep the system modular and extensible
-- Maintain clear data flow into the central intelligence layer and aurora-swarm-btc
+This document defines how the system will support hybrid deployments involving different communication backhauls and power options.
 
-## Node Types
+## 1. Node Categories
 
-### 1. Standard WiFi CSI Node (Current Primary)
-- ESP32 + WiFi
-- Runs custom firmware (`esp32_csi_udp_sender.ino`)
-- Performs CSI capture + sends JSON over UDP
-- Has built-in web dashboard
-- Best for: Indoor/covered areas with good WiFi
+### Type A: Standard WiFi CSI Node (Current Default)
+- Hardware: ESP32 (any common dev board)
+- Backhaul: WiFi + UDP
+- Power: USB or Battery
+- Capabilities: Full CSI capture + local web dashboard
+- Use case: Indoor or covered areas with reliable WiFi
 
-### 2. LoRa / Meshtastic Node
-- ESP32 + LoRa module (e.g. SX1262/SX1276)
-- Can run **Meshtastic firmware** for mesh networking
-- Can run custom firmware that bridges CSI data over LoRa
-- Best for: Long-range, outdoor, or off-grid deployments
+### Type B: LoRa / Meshtastic Node
+- Hardware: ESP32 + LoRa module (SX1262 / SX1276 recommended)
+- Backhaul options:
+  - Run **Meshtastic** firmware for mesh networking
+  - Run custom firmware that sends data over LoRa
+- Power: Battery or solar (typical for long-range nodes)
+- Use case: Long-range, outdoor, or off-grid deployments
 
-### 3. PoE Node
-- ESP32 with PoE support (via PoE splitter or PoE HAT)
-- More reliable power for always-on nodes
-- Can combine with WiFi or Ethernet backhaul
-- Best for: Fixed infrastructure positions
+### Type C: PoE Node
+- Hardware: ESP32 with PoE capability (splitter or native PoE board)
+- Backhaul: WiFi or Ethernet
+- Power: PoE (most reliable for fixed nodes)
+- Use case: Permanent installations where power reliability matters
 
-## Recommended Hybrid Patterns
+## 2. Recommended Hybrid Patterns
 
-### Pattern A: Meshtastic as Long-Range Backhaul
-- Some nodes run full Meshtastic firmware
-- They forward sensor data or alerts over the LoRa mesh
-- A gateway node bridges Meshtastic → MQTT / UDP → central system
+### Pattern 1: Meshtastic as Primary Long-Range Mesh
+- Many nodes run full Meshtastic firmware
+- They form a resilient long-range mesh
+- One or more gateway nodes bridge Meshtastic data into the central system (via MQTT, UDP, or serial)
 
-### Pattern B: Custom CSI + LoRa Fallback
-- Primary backhaul = WiFi UDP
-- Fallback / long-range = LoRa (custom or Meshtastic)
-- Useful when WiFi is unreliable
+### Pattern 2: WiFi Primary + LoRa Fallback
+- Nodes primarily use WiFi UDP
+- Fall back to LoRa (custom or Meshtastic) when WiFi is unavailable
+- Good for semi-reliable environments
 
-### Pattern C: Mixed PoE + Wireless
-- Critical nodes use PoE for reliability
-- Mobile / temporary nodes use battery + LoRa/WiFi
+### Pattern 3: Mixed PoE + Wireless Infrastructure
+- Critical fixed nodes use PoE
+- Mobile or temporary nodes use battery + LoRa/WiFi
 
-## Data Flow in Hybrid Deployments
+## 3. Data Flow Principles
 
-All node types should ultimately feed into the same central pipeline:
+All node types should ultimately deliver data into the same central pipeline:
 
 ```
-ESP32 Node (any type) → Transport (WiFi UDP / LoRa / MQTT)
-→ CSIIngestor / Bridge
-→ Fusion / Tracking / Behavior / Events
+Node (any type) → Transport Layer (WiFi UDP / LoRa / MQTT / Ethernet)
+→ Ingestor / Bridge
+→ Fusion → Tracking → Behavior → Events
 → SwarmBridge → aurora-swarm-btc
 ```
 
-## Current Status (v1.1.0)
+**Important:** We do **not** plan to send raw CSI matrices over LoRa (bandwidth is too limited). Instead we will send:
+- Summaries
+- Tracks / events
+- Alerts
+- Heartbeats
 
-- Standard WiFi CSI nodes: Fully supported
-- LoRa / Meshtastic support: In planning + early scaffolding
-- PoE nodes: Supported at hardware level (no firmware changes needed)
+## 4. Current Status (Stage 1)
 
-## Next Steps
+- Standard WiFi CSI nodes: Fully implemented and hardened
+- Hybrid architecture documentation: Created
+- Firmware modularization: Started
+- LoRa / Meshtastic integration: Not yet implemented (scaffolding only)
+- PoE support: Already possible at hardware level
 
-See the staged expansion plan in development discussions.
+## 5. Stage 1 Goals (Current Focus)
 
-Stage 1 (Current): Modular firmware + architecture documentation
-Stage 2: Add LoRa support scaffolding + Meshtastic integration guidance
-Stage 3: Full hybrid examples + PoE best practices
+- Finish modular firmware structure
+- Clearly document all hybrid patterns
+- Prepare clean extension points for LoRa/Meshtastic
+- Avoid breaking existing WiFi CSI functionality
 
-## Notes
-- Meshtastic is recommended for long-range mesh because it is mature and actively maintained.
-- We will avoid trying to run full CSI processing over LoRa (bandwidth constraints). Instead, we will send summaries, events, or alerts over LoRa.
+## 6. Future Stages (High Level)
+
+- Stage 2: Add LoRa support scaffolding + Meshtastic bridging guidance
+- Stage 3: Full hybrid examples + deployment playbooks
+
+## Notes & Principles
+
+- Prefer mature solutions (Meshtastic) over building everything from scratch for long-range mesh.
+- Keep the central intelligence layer (fusion, tracking, behavior, events) transport-agnostic.
+- Maintain strong observability and resilience across all node types.
+
+---
+
+**Version:** Stage 1 (June 2026)
