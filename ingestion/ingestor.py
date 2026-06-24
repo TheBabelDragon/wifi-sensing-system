@@ -1,31 +1,45 @@
 import socket
 import json
 import logging
+import time
 
 logger = logging.getLogger("csi-ingestor")
 
 class CSIIngestor:
-    def __init__(self, udp_port: int = 4210):
+    def __init__(self, udp_port: int = 4210, max_retries: int = 5):
         self.udp_port = udp_port
         self.sock = None
+        self.max_retries = max_retries
+        self._setup_socket()
+
+    def _setup_socket(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(("0.0.0.0", self.udp_port))
             self.sock.settimeout(0.8)
             logger.info(f"Listening for ESP32 CSI on UDP port {self.udp_port}")
         except Exception as e:
-            logger.warning(f"UDP listener failed to start: {e} (running in simulation mode)")
+            logger.error(f"Failed to bind UDP socket: {e}")
+            self.sock = None
 
     def read_packet(self):
-        if self.sock:
+        if self.sock is None:
+            self._setup_socket()
+            if self.sock is None:
+                return None
+
+        for attempt in range(self.max_retries):
             try:
                 data, addr = self.sock.recvfrom(2048)
                 return json.loads(data.decode())
             except socket.timeout:
                 return None
             except Exception as e:
-                logger.debug(f"Packet receive error: {e}")
-                return None
+                logger.warning(f"Socket error (attempt {attempt+1}): {e}")
+                time.sleep(0.1 * (attempt + 1))
+                self._setup_socket()
+
+        logger.error("Max retries exceeded on UDP read")
         return None
 
     def parse_csi(self, packet):
