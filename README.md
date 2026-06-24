@@ -1,30 +1,30 @@
-# WiFi CSI Spatial Intelligence System v1.1.0 + Aurora Swarm BTC
+# WiFi CSI Spatial Intelligence System v1.1.0
 
-**Fully operational spatial intelligence system** with highly polished ESP32 nodes featuring professional live web dashboards.
+**Production-oriented spatial intelligence system** with polished ESP32 nodes and robust Python backend.
 
-## ESP32 Experience (Now Extremely Polished)
+## Key Improvements (Beyond Proof of Concept)
 
-Each ESP32 node now delivers a **"holy shit, it just works"** experience:
-
-- Beautiful modern dark-themed web dashboard (auto-updates every 2s)
-- Real-time metrics: RSSI, Channel, Packets/sec, Total packets
-- Reliable CSI streaming + WiFi auto-reconnect
-- Excellent Serial logging
-
-Just flash → connect → open `http://<esp-ip>/` and you instantly see live activity.
+- Centralized configuration (`config.py`)
+- Proper logging throughout the system
+- More robust error handling and auto-reconnect logic
+- Cleaner, more maintainable module design
+- Professional ESP32 web dashboard
+- End-to-end integration with aurora-swarm-btc
 
 ## Quick Start
 
 ```bash
+git clone https://github.com/TheBabelDragon/wifi-sensing-system.git
+cd wifi-sensing-system
 python run_full_pipeline.py
 ```
 
-Flash ESP32 nodes with `esp32/esp32_csi_udp_sender.ino` (see `esp32/README.md` for details).
+## ESP32 Nodes
 
-## Full System
+Flash `esp32/esp32_csi_udp_sender.ino`. Open the node's IP in a browser for a clean live dashboard.
 
-- Edge: Professional ESP32 web dashboards
-- Center: Full Python intelligence stack with voxel visualization
-- Integration: Direct context feeding into aurora-swarm-btc
+## Architecture
 
-Ready for real deployment and impressive demonstrations.
+Edge (ESP32) → UDP → Ingestion → Fusion → Tracking → Behavior → Events → Agent → Swarm Bridge → aurora-swarm-btc
+
+Ready for real deployment.
