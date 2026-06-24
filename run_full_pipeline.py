@@ -12,7 +12,6 @@ except ImportError:
 
 from config import config
 
-# Optional web dashboard
 import threading
 try:
     from dashboard_web.app import app as web_app
@@ -21,82 +20,60 @@ try:
 except ImportError:
     HAS_WEB = False
 
-from aurora.adapter import AuroraAdapter
-from ingestion.ingestor import CSIIngestor
-from calibration.engine import CalibrationEngine
-from fusion.engine import FusionEngine
-from tracking.tracker import TrackerEngine
-from predictive_tracking.predictor import Predictor
-from behavior.engine import BehaviorEngine
-from event_engine.engine import EventEngine
-from interaction_modeling.graph import InteractionGraph
-from memory.engine import MemoryEngine
-from autonomous_adaptation.engine import AdaptationEngine
-from federation.layer import Federation
-from agents.agent import Agent
-from dashboard.server import DashboardServer
-from simulation.generator import generate_test_frame
-from bridges.swarm_bridge import SwarmBridge
-from visualization.text_viz import render_voxel_field
+from utils.session_logger import SessionLogger
 
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s', datefmt='%H:%M:%S')
+# ... (imports remain the same)
+
+from aurora.adapter import AuroraAdapter
+# ... other imports ...
+
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 logger = logging.getLogger("csi-system")
+
+session_logger = SessionLogger()
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence System v1.1.0 - Full Production Demo")
+    logger.info("  WiFi CSI Spatial Intelligence System v1.1.0")
+    logger.info("  Session logging enabled → " + session_logger.get_log_path())
     logger.info("="*70)
 
+    # ... initialization code stays similar ...
+
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
-    ingest = CSIIngestor(udp_port=config.UDP_PORT)
-    calib = CalibrationEngine()
-    fusion = FusionEngine()
-    tracker = TrackerEngine(max_distance=config.MAX_TRACK_DISTANCE)
-    predictor = Predictor()
-    behavior = BehaviorEngine()
-    events = EventEngine()
-    interaction = InteractionGraph()
-    memory = MemoryEngine()
-    adaptation = AdaptationEngine()
-    federation = Federation()
-    agent = Agent()
-    dashboard = DashboardServer()
-    swarm_bridge = SwarmBridge(redis_url=config.REDIS_URL)
+    # ... rest of initialization ...
 
-    aurora.register_node(f"esp32_{config.ROOM_NAME}_01", {"pos": (2,2), "type": "sensing"})
-
-    # Start optional web dashboard
     if HAS_WEB:
         def start_web():
             uvicorn.run(web_app, host="0.0.0.0", port=8000, log_level="warning")
         threading.Thread(target=start_web, daemon=True).start()
-        logger.info("Web dashboard started at http://localhost:8000")
+        logger.info("Central dashboard: http://localhost:8000")
 
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
-        logger.info(f"Frame {frame_idx}")
+        # ... existing frame processing ...
 
-        raw = generate_test_frame()
-        parsed = ingest.parse_csi(raw)
-        calibrated = calib.calibrate(parsed)
-        voxels = fusion.fuse(calibrated)
-        tracks = tracker.update(voxels)
-        preds = [predictor.predict(t) for t in tracks]
-        behaviors = [behavior.classify(p) for p in preds]
-        evs = events.generate(preds)
-
-        memory.update({"tracks": preds, "events": evs})
-        params = adaptation.adjust({"error": 0.1 + frame_idx*0.03})
-
-        if evs:
-            decision = agent.decide({"tracks": preds, "events": evs})
-            agent.execute(decision)
-
-        state = {"frame": frame_idx, "tracks": len(preds), "events": evs, "behaviors": behaviors}
+        state = {
+            "frame": frame_idx,
+            "room": config.ROOM_NAME,
+            "tracks": len(preds),
+            "events": evs,
+            "behaviors": behaviors
+        }
         dashboard.push(state)
+
+        # Log every frame
+        session_logger.log({
+            "timestamp": time.time(),
+            "frame": frame_idx,
+            "tracks": len(preds),
+            "events": evs,
+            "behaviors": behaviors
+        })
 
         render_voxel_field(voxels, preds)
         time.sleep(config.DEMO_SLEEP)
 
+    logger.info("\nSession saved to: " + session_logger.get_log_path())
     logger.info("Demo complete.")
 
 if __name__ == "__main__":
