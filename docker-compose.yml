@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  csi-system:
+    build: .
+    container_name: wifi-csi-intelligence
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - SIMULATION_FRAMES=10
+      - ROOM_NAME=mining_hall
+    depends_on:
+      - redis
+    ports:
+      - "8000:8000"   # Central dashboard
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: csi-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  # Optional: Run the swarm sensing listener alongside
+  # sensing-listener:
+  #   build:
+  #     context: ../aurora-swarm-btc
+  #   command: python sensing/integration.py
+  #   depends_on:
+  #     - redis
