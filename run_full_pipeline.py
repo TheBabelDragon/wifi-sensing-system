@@ -29,7 +29,7 @@ except ImportError:
 from utils.session_logger import SessionLogger
 
 # Core imports
-# (abbreviated for brevity)
+# (abbreviated)
 
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
@@ -59,7 +59,7 @@ if HAS_METRICS:
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Resilient Integration Mode")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Observable Integration")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -106,11 +106,11 @@ def run_pipeline():
             decision = agent.decide({"tracks": preds, "events": evs})
             agent.execute(decision)
 
-        # Send rich context + heartbeat
+        # Send rich context (also sends heartbeat)
         if frame_idx % 2 == 0 or len(preds) >= 2:
             swarm_bridge.send_full_context(preds, evs, behaviors, memory.room_profile)
 
-        # Periodic heartbeat even if no rich context
+        # Periodic standalone heartbeat
         if time.time() - last_heartbeat > 8:
             swarm_bridge.send_heartbeat()
             last_heartbeat = time.time()

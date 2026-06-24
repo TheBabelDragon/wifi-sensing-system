@@ -7,17 +7,17 @@ logger = logging.getLogger("swarm-bridge")
 class SwarmBridge:
     def __init__(self, redis_url: str = None):
         self.adapter = AuroraAdapter(redis_url=redis_url)
-        self.last_heartbeat = 0
 
-    def send_heartbeat(self):
-        """Send periodic heartbeat so the swarm knows we're alive."""
+    def send_heartbeat(self, extra: dict = None):
+        """Send heartbeat so the swarm knows the sensing system is alive."""
         payload = {
             "type": "HEARTBEAT",
             "timestamp": time.time(),
             "source": "wifi-csi-sensing"
         }
+        if extra:
+            payload.update(extra)
         self.adapter.update_swarm_state("sensing:heartbeat", payload)
-        self.last_heartbeat = time.time()
 
     def send_full_context(self, tracks, events, behaviors, memory_profile):
         payload = {
@@ -34,14 +34,4 @@ class SwarmBridge:
         }
         self.adapter.publish_to_swarm("sensing:context", payload)
         self.adapter.update_swarm_state("sensing:latest_context", payload)
-        self.send_heartbeat()  # Heartbeat on every rich update
-
-    def send_occupancy_event(self, room: str, count: int, behavior: str = None):
-        event = {
-            "type": "OCCUPANCY_DETECTED",
-            "room": room,
-            "count": count,
-            "behavior": behavior,
-            "source": "wifi-csi-sensing"
-        }
-        self.adapter.publish_to_swarm("sensing:events", event)
+        self.send_heartbeat()  # Heartbeat piggybacked on rich updates
