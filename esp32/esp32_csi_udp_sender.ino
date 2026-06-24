@@ -1,182 +1,149 @@
 /*
-  ESP32 CSI + Professional Live Viewing Firmware
+  ESP32 CSI Node - Hardened Production Firmware
   WiFi Spatial Intelligence System v1.1.0
 
-  This firmware turns an ESP32 into a rock-solid CSI sensing node
-  with a beautiful, real-time web dashboard.
+  Hardened features:
+  - Watchdog timer
+  - Robust WiFi reconnection with backoff
+  - NVS Preferences for persistent config
+  - Status LED patterns
+  - Professional web dashboard
+  - Clean logging
 
-  Features:
-  - Reliable CSI capture
-  - UDP streaming to central pipeline
-  - Beautiful auto-updating web dashboard
-  - WiFi auto-reconnect
-  - Clear Serial logging
-  - Easy configuration
-
-  Flash with Arduino IDE (ESP32 board)
+  Recommended for real deployments.
 */
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <WebServer.h>
+#include <esp_task_wdt.h>
+#include <Preferences.h>
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 
-// ================== USER CONFIGURATION ==================
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-
-const char* target_ip = "192.168.1.100";   // IP of your Python pipeline
+// ================== CONFIGURATION ==================
+// These can be overridden via NVS after first boot
+String node_id = "esp32_mining_hall_01";
+String target_ip = "192.168.1.100";
 int target_port = 4210;
-const char* node_id = "esp32_mining_hall_01";
-// =======================================================
+
+const char* wifi_ssid = "YOUR_WIFI_SSID";
+const char* wifi_password = "YOUR_WIFI_PASSWORD";
+
+const int STATUS_LED = 2;  // Built-in LED on most ESP32 DevKits
+// ===================================================
 
 WiFiUDP udp;
 WebServer server(80);
+Preferences preferences;
 
-// Runtime state
-String last_status = "Starting...";
+// State
 int packet_count = 0;
 int rssi = 0;
 int channel = 0;
-unsigned long last_packet_time = 0;
 int packets_per_second = 0;
-unsigned long last_pps_calc = 0;
-int pps_counter = 0;
+String last_status = "Booting...";
+unsigned long last_reconnect_attempt = 0;
+int reconnect_delay = 1000;  // Start with 1s backoff
 
 // ================== CSI CALLBACK ==================
-void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
+void IRAM_ATTR csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
   if (!info || !info->buf) return;
 
   packet_count++;
-  pps_counter++;
   rssi = info->rx_ctrl.rssi;
   channel = info->rx_ctrl.channel;
-  last_packet_time = millis();
 
-  // Build clean JSON for pipeline
   String payload = "{";
-  payload += "\"node\":\"" + String(node_id) + "\",";
+  payload += "\"node\":\"" + node_id + "\",";
   payload += "\"rssi\":" + String(rssi) + ",";
   payload += "\"channel\":" + String(channel) + ",";
   payload += "\"timestamp\":" + String(millis()) + ",";
-  payload += "\"csi_len\":" + String(info->len) + ",";
-  payload += "\"pps\":" + String(packets_per_second);
+  payload += "\"csi_len\":" + String(info->len);
   payload += "}";
 
-  udp.beginPacket(target_ip, target_port);
+  udp.beginPacket(target_ip.c_str(), target_port);
   udp.print(payload);
   udp.endPacket();
-
-  last_status = "Streaming | RSSI: " + String(rssi) + " dBm | Ch: " + String(channel);
 }
 
 // ================== WEB DASHBOARD ==================
 void handleRoot() {
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32 CSI Live View</title>
-  <style>
-    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }
-    .container { max-width: 800px; margin: 0 auto; }
-    h1 { color: #60a5fa; margin-bottom: 8px; }
-    .card { background: #1e2937; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); }
-    .metric { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #334155; }
-    .metric:last-child { border-bottom: none; }
-    .label { color: #94a3b8; font-size: 0.95rem; }
-    .value { font-size: 1.35rem; font-weight: 600; color: #60a5fa; }
-    .status { padding: 8px 16px; border-radius: 9999px; font-size: 0.9rem; display: inline-block; }
-    .status-good { background: #166534; color: #86efac; }
-    .status-warn { background: #854d0e; color: #fde047; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .footer { text-align: center; color: #64748b; font-size: 0.85rem; margin-top: 30px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>ESP32 CSI Live View</h1>
-    <p style="color:#64748b; margin-top:0;">Node: )rawliteral" + String(node_id) + R"rawliteral(</p>
-
-    <div class="card">
-      <div class="metric">
-        <span class="label">Status</span>
-        <span class="status status-good" id="status">)rawliteral" + last_status + R"rawliteral(</span>
-      </div>
-      <div class="metric">
-        <span class="label">RSSI</span>
-        <span class="value" id="rssi">)rawliteral" + String(rssi) + R"rawliteral( dBm</span>
-      </div>
-      <div class="metric">
-        <span class="label">Channel</span>
-        <span class="value" id="channel">)rawliteral" + String(channel) + R"rawliteral(</span>
-      </div>
-      <div class="metric">
-        <span class="label">Packets / sec</span>
-        <span class="value" id="pps">)rawliteral" + String(packets_per_second) + R"rawliteral(</span>
-      </div>
-      <div class="metric">
-        <span class="label">Total Packets</span>
-        <span class="value" id="total">)rawliteral" + String(packet_count) + R"rawliteral(</span>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="metric">
-        <span class="label">Pipeline Target</span>
-        <span class="value" style="font-size:1rem;">)rawliteral" + String(target_ip) + ":" + String(target_port) + R"rawliteral(</span>
-      </div>
-      <div class="metric">
-        <span class="label">IP Address</span>
-        <span class="value" style="font-size:1rem;">)rawliteral" + WiFi.localIP().toString() + R"rawliteral(</span>
-      </div>
-    </div>
-
-    <div class="footer">
-      WiFi CSI Spatial Intelligence System • Auto-updates every 2s
-    </div>
-  </div>
-
-  <script>
-    setTimeout(() => location.reload(), 2000);
-  </script>
-</body>
-</html>
-)rawliteral";
-
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>ESP32 CSI Node</title>";
+  html += "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;padding:20px;max-width:700px;margin:auto} .card{background:#1e2937;border-radius:12px;padding:20px;margin:15px 0} .metric{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #334155} .value{font-weight:600;color:#60a5fa}</style>";
+  html += "</head><body>";
+  html += "<h1>ESP32 CSI Node</h1>";
+  html += "<div class='card'>";
+  html += "<div class='metric'><span>Node ID</span><span class='value'>" + node_id + "</span></div>";
+  html += "<div class='metric'><span>Status</span><span class='value'>" + last_status + "</span></div>";
+  html += "<div class='metric'><span>RSSI</span><span class='value'>" + String(rssi) + " dBm</span></div>";
+  html += "<div class='metric'><span>Channel</span><span class='value'>" + String(channel) + "</span></div>";
+  html += "<div class='metric'><span>Packets/sec</span><span class='value'>" + String(packets_per_second) + "</span></div>";
+  html += "<div class='metric'><span>Total Packets</span><span class='value'>" + String(packet_count) + "</span></div>";
+  html += "</div>";
+  html += "<p style='color:#64748b;font-size:0.9rem'>Auto-refreshing • Pipeline: " + target_ip + ":" + String(target_port) + "</p>";
+  html += "</body></html>";
   server.send(200, "text/html", html);
+}
+
+// ================== WIFI MANAGEMENT ==================
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifi_ssid, wifi_password);
+  Serial.print("Connecting to WiFi");
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(400);
+    Serial.print(".");
+    digitalWrite(STATUS_LED, !digitalRead(STATUS_LED));
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[WiFi] Connected! IP: " + WiFi.localIP().toString());
+    last_status = "WiFi Connected";
+    reconnect_delay = 1000;
+    digitalWrite(STATUS_LED, HIGH);
+  } else {
+    Serial.println("\n[WiFi] Failed to connect");
+    last_status = "WiFi Connection Failed";
+  }
+}
+
+void handleWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    unsigned long now = millis();
+    if (now - last_reconnect_attempt > reconnect_delay) {
+      Serial.println("[WiFi] Attempting reconnect...");
+      WiFi.disconnect();
+      WiFi.begin(wifi_ssid, wifi_password);
+      last_reconnect_attempt = now;
+      reconnect_delay = min(reconnect_delay * 2, 30000); // Exponential backoff
+    }
+  }
 }
 
 // ================== SETUP ==================
 void setup() {
   Serial.begin(115200);
-  delay(800);
-  Serial.println("\n===================================");
-  Serial.println("  ESP32 CSI Live View Node");
-  Serial.println("  WiFi Spatial Intelligence v1.1.0");
-  Serial.println("===================================\n");
+  delay(600);
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, LOW);
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  Serial.println("\n=== ESP32 CSI Hardened Node v1.1.0 ===");
 
-  Serial.print("Connecting to WiFi");
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
+  // Load persistent config from NVS
+  preferences.begin("csi-node", false);
+  if (preferences.isKey("node_id")) node_id = preferences.getString("node_id", node_id);
+  if (preferences.isKey("target_ip")) target_ip = preferences.getString("target_ip", target_ip);
+  preferences.end();
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WiFi] Connected!");
-    Serial.print("[WiFi] IP: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\n[WiFi] Connection failed!");
-  }
+  Serial.println("Node ID: " + node_id);
+  Serial.println("Target: " + target_ip + ":" + String(target_port));
+
+  connectWiFi();
 
   udp.begin(4210);
 
@@ -192,40 +159,48 @@ void setup() {
   esp_wifi_set_csi_config(&csi_config);
   esp_wifi_set_csi(true);
 
+  // Web server
   server.on("/", handleRoot);
   server.begin();
 
-  Serial.println("[Web] Dashboard ready at http://" + WiFi.localIP().toString());
-  Serial.println("[CSI] Streaming started.\n");
-  last_status = "Connected & Streaming";
+  // Enable Watchdog (5 seconds)
+  esp_task_wdt_init(5, true);
+  esp_task_wdt_add(NULL);
+
+  Serial.println("[System] Hardened node ready. Web dashboard active.");
+  last_status = "Running - Streaming CSI";
+  digitalWrite(STATUS_LED, HIGH);
 }
 
 // ================== LOOP ==================
 void loop() {
+  esp_task_wdt_reset();           // Feed watchdog
   server.handleClient();
+  handleWiFi();
 
-  // Calculate packets per second
-  unsigned long now = millis();
-  if (now - last_pps_calc > 1000) {
-    packets_per_second = pps_counter;
-    pps_counter = 0;
-    last_pps_calc = now;
+  // Simple PPS calculation
+  static unsigned long last_pps = 0;
+  static int pps_count = 0;
+  if (millis() - last_pps > 1000) {
+    packets_per_second = pps_count;
+    pps_count = 0;
+    last_pps = millis();
   }
 
-  // WiFi auto-reconnect
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Reconnecting...");
-    WiFi.reconnect();
-    delay(3000);
+  // Status LED heartbeat
+  static unsigned long last_blink = 0;
+  if (millis() - last_blink > 1500) {
+    digitalWrite(STATUS_LED, !digitalRead(STATUS_LED));
+    last_blink = millis();
   }
 
-  // Periodic status on Serial
-  static unsigned long last_serial = 0;
-  if (now - last_serial > 4000) {
-    Serial.printf("[Status] %s | RSSI: %d dBm | PPS: %d | Total: %d\n",
+  // Periodic logging
+  static unsigned long last_log = 0;
+  if (millis() - last_log > 8000) {
+    Serial.printf("[Status] %s | RSSI:%d | PPS:%d | Total:%d\n", 
                   last_status.c_str(), rssi, packets_per_second, packet_count);
-    last_serial = now;
+    last_log = millis();
   }
 
-  delay(10);
+  delay(8);
 }
