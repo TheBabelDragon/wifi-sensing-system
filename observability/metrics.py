@@ -1,16 +1,20 @@
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 import time
 
-# Core pipeline metrics
+# Pipeline metrics
 FRAMES_PROCESSED = Counter('csi_frames_processed_total', 'Total frames processed')
 TRACK_COUNT = Gauge('csi_active_tracks', 'Current number of active tracks')
 EVENT_COUNT = Counter('csi_events_total', 'Total events generated', ['event_type'])
 PROCESSING_TIME = Histogram('csi_frame_processing_seconds', 'Time spent processing each frame')
 
-# Integration health metrics (sensing <-> swarm)
-INTEGRATION_HEALTHY = Gauge('sensing_swarm_integration_healthy', '1 = healthy, 0 = degraded')
-HEARTBEAT_AGE = Gauge('sensing_heartbeat_age_seconds', 'Age of last heartbeat from sensing')
-LAST_CONTEXT_AGE = Gauge('sensing_last_context_age_seconds', 'Age of last rich context update from sensing')
+# Integration health
+INTEGRATION_HEALTHY = Gauge('sensing_swarm_integration_healthy', 'Integration health')
+HEARTBEAT_AGE = Gauge('sensing_heartbeat_age_seconds', 'Heartbeat age')
+LAST_CONTEXT_AGE = Gauge('sensing_last_context_age_seconds', 'Last context age')
+
+# Command metrics (new)
+COMMANDS_RECEIVED = Counter('sensing_commands_received_total', 'Commands received from swarm', ['command_type'])
+COMMANDS_PROCESSED = Counter('sensing_commands_processed_total', 'Successfully processed commands', ['command_type'])
 
 class Metrics:
     def __init__(self, port: int = 8001):
@@ -31,6 +35,11 @@ class Metrics:
             HEARTBEAT_AGE.set(heartbeat_age)
         if context_age is not None:
             LAST_CONTEXT_AGE.set(context_age)
+
+    def record_command(self, command_type: str, success: bool = True):
+        COMMANDS_RECEIVED.labels(command_type=command_type).inc()
+        if success:
+            COMMANDS_PROCESSED.labels(command_type=command_type).inc()
 
 metrics = None
 
