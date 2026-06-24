@@ -1,4 +1,5 @@
 from aurora.adapter import AuroraAdapter
+import json
 
 class SwarmBridge:
     def __init__(self, redis_url: str = None):
@@ -24,13 +25,25 @@ class SwarmBridge:
         }
         self.adapter.publish_to_swarm("sensing:alerts", event)
 
+    def send_full_context(self, tracks: list, events: list, behaviors: list, memory_profile: dict):
+        """Send rich structured context to the swarm (secure channel)."""
+        payload = {
+            "type": "FULL_CONTEXT_UPDATE",
+            "timestamp": __import__('time').time(),
+            "tracks": tracks,
+            "events": events,
+            "behaviors": behaviors,
+            "memory_summary": {
+                "avg_occupancy": memory_profile.get("avg_occupancy"),
+                "total_events": memory_profile.get("total_occupancy_events")
+            },
+            "source": "wifi-csi-sensing"
+        }
+        self.adapter.publish_to_swarm("sensing:context", payload)
+        self.adapter.update_swarm_state("sensing:latest_context", payload)
+
     def send_thermal_context(self, avg_temp_proxy: float):
-        """Proxy for heat signature / occupancy heat"""
         self.adapter.update_swarm_state("sensing:thermal_context", {
             "avg_temp_proxy": avg_temp_proxy,
-            "timestamp": "now"
+            "timestamp": __import__('time').time()
         })
-
-    def get_swarm_status(self):
-        # Placeholder - in real deployment would read from bus
-        return {"status": "connected", "mood": "They yearn for the mines"}
