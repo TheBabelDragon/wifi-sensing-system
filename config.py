@@ -1,29 +1,58 @@
-"""Central configuration for WiFi CSI Spatial Intelligence System."""
+"""Central configuration system supporting YAML + environment variables."""
 
 import os
+import yaml
+from dataclasses import dataclass, field
+from typing import Optional
 
+@dataclass
 class Config:
     # === General ===
-    NODE_ID = os.getenv("NODE_ID", "esp32_mining_hall_01")
-    ROOM_NAME = os.getenv("SENSING_ROOM_NAME", "mining_hall")
+    NODE_ID: str = "esp32_mining_hall_01"
+    ROOM_NAME: str = "mining_hall"
 
     # === UDP / Ingestion ===
-    UDP_PORT = int(os.getenv("UDP_PORT", 4210))
+    UDP_PORT: int = 4210
 
     # === Pipeline ===
-    SIMULATION_FRAMES = int(os.getenv("SIMULATION_FRAMES", 8))
-    DEMO_SLEEP = float(os.getenv("DEMO_SLEEP", 0.35))
+    SIMULATION_FRAMES: int = 8
+    DEMO_SLEEP: float = 0.35
 
     # === Redis / Swarm ===
-    REDIS_URL = os.getenv("REDIS_URL", None)
+    REDIS_URL: Optional[str] = None
 
     # === Tracking ===
-    MAX_TRACK_DISTANCE = float(os.getenv("MAX_TRACK_DISTANCE", 3.0))
+    MAX_TRACK_DISTANCE: float = 3.0
 
     # === Agent ===
-    AGENT_COOLDOWN = int(os.getenv("AGENT_COOLDOWN", 25))
+    AGENT_COOLDOWN: int = 25
 
     # === Logging ===
-    VERBOSE = os.getenv("VERBOSE", "true").lower() == "true"
+    LOG_LEVEL: str = "INFO"
+    STRUCTURED_LOGGING: bool = False
 
-config = Config()
+    @classmethod
+    def from_yaml(cls, path: str = "config.yaml"):
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                data = yaml.safe_load(f) or {}
+            return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
+        return cls()
+
+    def apply_env_overrides(self):
+        for key in self.__dataclass_fields__:
+            env_val = os.getenv(key)
+            if env_val is not None:
+                field_type = self.__dataclass_fields__[key].type
+                if field_type == bool:
+                    setattr(self, key, env_val.lower() in ("true", "1", "yes"))
+                elif field_type == int:
+                    setattr(self, key, int(env_val))
+                elif field_type == float:
+                    setattr(self, key, float(env_val))
+                else:
+                    setattr(self, key, env_val)
+
+# Global config instance
+config = Config.from_yaml()
+config.apply_env_overrides()
