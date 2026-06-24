@@ -29,7 +29,7 @@ except ImportError:
 from utils.session_logger import SessionLogger
 
 # Core imports
-# (abbreviated)
+# (abbreviated for brevity)
 
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
@@ -59,7 +59,7 @@ if HAS_METRICS:
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 + Observability")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Resilient Integration Mode")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -86,6 +86,8 @@ def run_pipeline():
         threading.Thread(target=start_web, daemon=True).start()
         logger.info("Dashboard: http://localhost:8000")
 
+    last_heartbeat = time.time()
+
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
         start_time = time.time()
 
@@ -104,8 +106,14 @@ def run_pipeline():
             decision = agent.decide({"tracks": preds, "events": evs})
             agent.execute(decision)
 
-        if frame_idx % 2 == 0:
+        # Send rich context + heartbeat
+        if frame_idx % 2 == 0 or len(preds) >= 2:
             swarm_bridge.send_full_context(preds, evs, behaviors, memory.room_profile)
+
+        # Periodic heartbeat even if no rich context
+        if time.time() - last_heartbeat > 8:
+            swarm_bridge.send_heartbeat()
+            last_heartbeat = time.time()
 
         state = {
             "frame": frame_idx,
@@ -116,7 +124,6 @@ def run_pipeline():
         }
         dashboard.push(state)
 
-        # Record metrics
         if HAS_METRICS:
             processing_time = time.time() - start_time
             metrics.record_frame(processing_time, len(preds), evs)
