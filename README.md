@@ -1,20 +1,14 @@
 # WiFi CSI Spatial Intelligence System v1.1.0
 
-**Production-ready system** with Docker + basic observability.
+**Early bidirectional integration with aurora-swarm-btc is now active.**
 
-## Quick Start (Docker)
+## Important Disclaimer
 
-```bash
-docker compose up --build
-```
+The command channel from swarm → sensing (`sensing/command_listener.py`) is in an early stage:
 
-- Central dashboard: **http://localhost:8000**
-- Prometheus metrics: **http://localhost:8001/metrics**
+- Commands are currently **unauthenticated** and minimally validated.
+- This channel should only be used in trusted/internal environments.
+- Do not expose it to untrusted networks without adding authentication and validation layers.
+- Future versions will include proper security controls.
 
-## Features
-- Hardened ESP32 nodes
-- Rich data sharing with aurora-swarm-btc
-- Central dashboard + Prometheus metrics
-- Docker ready
-
-Ready for deployment and monitoring.
+Use responsibly.
