@@ -1,18 +1,17 @@
 # WiFi CSI Spatial Intelligence System v1.1.0 + Aurora Swarm BTC
 
-**Fully operational spatial intelligence system** with powerful ESP32 nodes featuring **built-in live web viewing**.
+**Fully operational spatial intelligence system** with highly polished ESP32 nodes featuring professional live web dashboards.
 
-## ESP32 Live Viewing (New)
+## ESP32 Experience (Now Extremely Polished)
 
-Each ESP32 node now runs a built-in web server.
+Each ESP32 node now delivers a **"holy shit, it just works"** experience:
 
-After flashing, simply open:
+- Beautiful modern dark-themed web dashboard (auto-updates every 2s)
+- Real-time metrics: RSSI, Channel, Packets/sec, Total packets
+- Reliable CSI streaming + WiFi auto-reconnect
+- Excellent Serial logging
 
-```
-http://<ESP32-IP-ADDRESS>/
-```
-
-You get a beautiful, auto-refreshing live dashboard showing real-time CSI data, RSSI, channel, and packet statistics — perfect for deployment, debugging, and live demonstrations.
+Just flash → connect → open `http://<esp-ip>/` and you instantly see live activity.
 
 ## Quick Start
 
@@ -20,19 +19,12 @@ You get a beautiful, auto-refreshing live dashboard showing real-time CSI data, 
 python run_full_pipeline.py
 ```
 
-Flash ESP32 nodes using `esp32/esp32_csi_udp_sender.ino` (see `esp32/README.md`).
+Flash ESP32 nodes with `esp32/esp32_csi_udp_sender.ino` (see `esp32/README.md` for details).
 
-The system now provides end-to-end WiFi tracking with live visibility at both the edge (ESP32 web UI) and the center (Python pipeline + visualization).
+## Full System
 
-## Full Capabilities
+- Edge: Professional ESP32 web dashboards
+- Center: Full Python intelligence stack with voxel visualization
+- Integration: Direct context feeding into aurora-swarm-btc
 
-- Real CSI capture on ESP32
-- Live web dashboard per node
-- UDP streaming to central intelligence stack
-- Voxel-based spatial reconstruction
-- Multi-object tracking with velocity
-- Behavior understanding & event detection
-- Intelligent agent decisions
-- Direct integration with aurora-swarm-btc mining swarm
-
-Ready for real-world deployment.
+Ready for real deployment and impressive demonstrations.
