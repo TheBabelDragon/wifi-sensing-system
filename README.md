@@ -1,30 +1,26 @@
 # WiFi CSI Spatial Intelligence System v1.1.0
 
-**Production-oriented spatial intelligence system** with polished ESP32 nodes and robust Python backend.
+**Fully hardened, production-oriented spatial intelligence platform** with ESP32 edge nodes and central intelligence.
 
-## Key Improvements (Beyond Proof of Concept)
+## New: Central Web Dashboard
 
-- Centralized configuration (`config.py`)
-- Proper logging throughout the system
-- More robust error handling and auto-reconnect logic
-- Cleaner, more maintainable module design
-- Professional ESP32 web dashboard
-- End-to-end integration with aurora-swarm-btc
+When running `python run_full_pipeline.py`, a FastAPI dashboard is automatically started at **http://localhost:8000** showing live system state.
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/TheBabelDragon/wifi-sensing-system.git
 cd wifi-sensing-system
+pip install -r requirements.txt
 python run_full_pipeline.py
 ```
 
-## ESP32 Nodes
+## Key Features
 
-Flash `esp32/esp32_csi_udp_sender.ino`. Open the node's IP in a browser for a clean live dashboard.
+- Hardened ESP32 nodes with professional live web UI + Watchdog + persistent config
+- Robust Python backend with centralized config and logging
+- Optional central FastAPI dashboard
+- Direct integration with aurora-swarm-btc
+- Multi-node capable
 
-## Architecture
-
-Edge (ESP32) → UDP → Ingestion → Fusion → Tracking → Behavior → Events → Agent → Swarm Bridge → aurora-swarm-btc
-
-Ready for real deployment.
+Ready for real deployment and monitoring.
