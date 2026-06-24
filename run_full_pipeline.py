@@ -3,6 +3,7 @@ sys.path.append('.')
 import os
 import time
 import logging
+import threading
 
 try:
     from dotenv import load_dotenv
@@ -12,7 +13,6 @@ except ImportError:
 
 from config import config
 
-import threading
 try:
     from dashboard_web.app import app as web_app
     import uvicorn
@@ -25,6 +25,12 @@ try:
     HAS_METRICS = True
 except ImportError:
     HAS_METRICS = False
+
+try:
+    from sensing.command_listener import SensingCommandListener
+    HAS_COMMAND_LISTENER = True
+except ImportError:
+    HAS_COMMAND_LISTENER = False
 
 from utils.session_logger import SessionLogger
 
@@ -59,7 +65,7 @@ if HAS_METRICS:
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Observable Integration")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Bidirectional Mode")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -80,11 +86,20 @@ def run_pipeline():
 
     aurora.register_node(f"esp32_{config.ROOM_NAME}_01", {"pos": (2,2), "type": "sensing"})
 
+    # Start central dashboard
     if HAS_WEB:
         def start_web():
             uvicorn.run(web_app, host="0.0.0.0", port=8000, log_level="warning")
         threading.Thread(target=start_web, daemon=True).start()
         logger.info("Dashboard: http://localhost:8000")
+
+    # Start command listener (bidirectional)
+    if HAS_COMMAND_LISTENER:
+        def start_listener():
+            listener = SensingCommandListener(redis_url=config.REDIS_URL)
+            listener.listen()
+        threading.Thread(target=start_listener, daemon=True).start()
+        logger.info("Bidirectional command listener active")
 
     last_heartbeat = time.time()
 
@@ -106,11 +121,9 @@ def run_pipeline():
             decision = agent.decide({"tracks": preds, "events": evs})
             agent.execute(decision)
 
-        # Send rich context (also sends heartbeat)
         if frame_idx % 2 == 0 or len(preds) >= 2:
             swarm_bridge.send_full_context(preds, evs, behaviors, memory.room_profile)
 
-        # Periodic standalone heartbeat
         if time.time() - last_heartbeat > 8:
             swarm_bridge.send_heartbeat()
             last_heartbeat = time.time()
