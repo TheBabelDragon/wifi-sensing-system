@@ -34,9 +34,7 @@ except ImportError:
 
 from utils.session_logger import SessionLogger
 
-# Core imports
-# (abbreviated)
-
+# Full imports for the complete pipeline
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
 from calibration.engine import CalibrationEngine
@@ -86,14 +84,12 @@ def run_pipeline():
 
     aurora.register_node(f"esp32_{config.ROOM_NAME}_01", {"pos": (2,2), "type": "sensing"})
 
-    # Start central dashboard
     if HAS_WEB:
         def start_web():
             uvicorn.run(web_app, host="0.0.0.0", port=8000, log_level="warning")
         threading.Thread(target=start_web, daemon=True).start()
         logger.info("Dashboard: http://localhost:8000")
 
-    # Start command listener (bidirectional)
     if HAS_COMMAND_LISTENER:
         def start_listener():
             listener = SensingCommandListener(redis_url=config.REDIS_URL)
