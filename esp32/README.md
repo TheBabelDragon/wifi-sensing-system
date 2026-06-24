@@ -1,24 +1,68 @@
-# ESP32 CSI Firmware for WiFi Sensing System
+# ESP32 CSI Firmware - Advanced Live Viewing Edition
 
-This folder contains ready-to-flash firmware for ESP32 devices to act as CSI sensing nodes.
+This firmware turns any ESP32 into a powerful WiFi CSI sensing node with **built-in live viewing**.
 
-## Quick Flash (Arduino IDE - Easiest)
+## Key Features
 
-1. Install Arduino IDE + ESP32 board support (https://docs.espressif.com/projects/arduino-esp32/)
+- Real-time CSI capture
+- UDP streaming to central Python pipeline
+- **Built-in Web Server** for live viewing (auto-refreshing dashboard)
+- Rich JSON payload (RSSI, channel, packet count)
+- Serial debug output
+- Easy configuration
+
+## Quick Flash (Arduino IDE)
+
+1. Install Arduino IDE + ESP32 board support
 2. Open `esp32_csi_udp_sender.ino`
-3. Set your WiFi credentials and target host IP (the machine running the Python pipeline)
-4. Upload to ESP32
+3. Edit the configuration section at the top:
+   - WiFi credentials
+   - `target_ip` (IP of your Python pipeline machine)
+   - `node_id` (unique name for this sensor)
+4. Upload
 
-## Features
-- Captures CSI data from WiFi packets
-- Sends structured JSON over UDP to the central pipeline
-- Low power / configurable interval
-- Multiple nodes supported (each with unique node_id)
+## Live Viewing
 
-## Hardware
-- Any ESP32 (DevKit, NodeMCU, etc.)
-- 2.4GHz WiFi (required for CSI)
+After flashing, open a browser and go to:
 
-After flashing, the ESP32 will start streaming CSI data. The Python `CSIIngestor` can receive it via UDP.
+```
+http://<ESP32-IP-ADDRESS>/
+```
 
-See main README for full system integration with aurora-swarm-btc.
+You will see a live-updating page showing:
+- Current RSSI and channel
+- Packet count
+- Connection status
+- Pipeline target
+
+The page auto-refreshes every 2 seconds.
+
+This is extremely useful for:
+- Deployment debugging
+- Verifying coverage
+- Live monitoring during testing
+- Demonstrations
+
+## Data Sent to Pipeline
+
+The ESP32 sends structured JSON over UDP containing:
+- node_id
+- rssi
+- channel
+- timestamp
+- csi_len
+- packet_count
+
+The central `CSIIngestor` receives this data and feeds the full intelligence stack.
+
+## Tips
+
+- Place multiple ESP32s for better spatial coverage
+- Use unique `node_id` for each
+- The web interface works even while streaming data
+
+For production, you can extend this firmware with:
+- Full CSI matrix transmission
+- MQTT instead of UDP
+- OLED display support
+- Deep sleep modes
