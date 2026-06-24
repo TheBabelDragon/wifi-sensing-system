@@ -7,27 +7,37 @@ from typing import Callable, Optional, Dict, Any
 
 logger = logging.getLogger("sensing-command-listener")
 
-VALID_COMMANDS = {"scale_down", "security_mode", "scale_up"}
+VALID_COMMAND_TYPES = {"scale_down", "security_mode", "scale_up"}
 
 class SensingCommandListener:
     """
-    Production-minded command listener for aurora-swarm-btc.
+    Resilient command listener for aurora-swarm-btc.
 
     Features:
-    - Basic command validation
+    - Automatic reconnection on Redis failures
+    - Command validation against known types
     - Per-command error isolation
     - Stats tracking
-    - Default handlers for common actions
+    - Default handlers
+
+    Message Contract (expected from swarm):
+    {
+        "action" or "type": one of VALID_COMMAND_TYPES,
+        "factor": float (for scale commands),
+        "duration_minutes": int (for security_mode),
+        "reason": str (optional)
+    }
 
     DISCLAIMER:
-    Early stage bidirectional channel. Currently unauthenticated.
+    Early-stage bidirectional channel. Currently unauthenticated.
     Use only in trusted environments.
     """
 
-    def __init__(self, redis_url: Optional[str] = None):
+    def __init__(self, redis_url: Optional[str] = None, reconnect_delay: int = 5):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
-        self.r = redis.from_url(self.redis_url, decode_responses=True)
-        self.pubsub = self.r.pubsub()
+        self.reconnect_delay = reconnect_delay
+        self.r = None
+        self.pubsub = None
         self.handlers: Dict[str, Callable] = {}
         self.stats = {"total": 0, "by_type": {}}
         self.last_command_time = None
@@ -36,12 +46,24 @@ class SensingCommandListener:
         self.register_handler("security_mode", self._handle_security_mode)
         self.register_handler("scale_up", self._handle_scale_up)
 
+        self._connect()
+
+    def _connect(self):
+        try:
+            self.r = redis.from_url(self.redis_url, decode_responses=True)
+            self.pubsub = self.r.pubsub()
+            logger.info("Connected to Redis for command listening")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            self.r = None
+            self.pubsub = None
+
     def register_handler(self, command_type: str, handler: Callable):
         self.handlers[command_type] = handler
 
     def _validate_command(self, command: Dict[str, Any]) -> bool:
         cmd_type = command.get("type") or command.get("action")
-        return cmd_type in VALID_COMMANDS if cmd_type else False
+        return cmd_type in VALID_COMMAND_TYPES
 
     def _record_stats(self, cmd_type: str):
         self.stats["total"] += 1
@@ -75,27 +97,40 @@ class SensingCommandListener:
         }
 
     def listen(self):
-        self.pubsub.psubscribe("aurora:swarm:commands")
-        logger.info("Command listener active")
-
-        for message in self.pubsub.listen():
-            if message['type'] == 'pmessage':
-                try:
-                    command = json.loads(message['data'])
-                except Exception:
-                    command = {"raw": message['data']}
-
-                cmd_type = command.get("type") or command.get("action", "unknown")
-
-                if not self._validate_command(command) and cmd_type != "unknown":
-                    logger.warning(f"[Command] Invalid command type received: {cmd_type}")
+        while True:
+            if self.pubsub is None:
+                self._connect()
+                if self.pubsub is None:
+                    time.sleep(self.reconnect_delay)
                     continue
 
-                handler = self.handlers.get(cmd_type, self._default_handler)
-                try:
-                    handler(command)
-                except Exception as e:
-                    logger.error(f"Handler error for {cmd_type}: {e}")
+            try:
+                self.pubsub.psubscribe("aurora:swarm:commands")
+                logger.info("Subscribed to aurora:swarm:commands")
+
+                for message in self.pubsub.listen():
+                    if message['type'] == 'pmessage':
+                        try:
+                            command = json.loads(message['data'])
+                        except Exception:
+                            command = {"raw": message['data']}
+
+                        cmd_type = command.get("type") or command.get("action", "unknown")
+
+                        if not self._validate_command(command) and cmd_type != "unknown":
+                            logger.warning(f"Invalid command type: {cmd_type}")
+                            continue
+
+                        handler = self.handlers.get(cmd_type, self._default_handler)
+                        try:
+                            handler(command)
+                        except Exception as e:
+                            logger.error(f"Handler error for {cmd_type}: {e}")
+
+            except Exception as e:
+                logger.warning(f"Command listener error (will reconnect): {e}")
+                self.pubsub = None
+                time.sleep(self.reconnect_delay)
 
 if __name__ == "__main__":
     listener = SensingCommandListener()
