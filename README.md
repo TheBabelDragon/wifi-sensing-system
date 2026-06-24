@@ -1,16 +1,14 @@
 # WiFi CSI Spatial Intelligence System v1.1.0
 
-**Fully hardened platform** that securely shares rich structured context with aurora-swarm-btc.
+**Fully working system** that sends rich structured context to aurora-swarm-btc and triggers real reactions.
 
-## Secure Rich Data Sharing
+## Current State
 
-The system sends structured, namespaced data (`aurora:sensing:*` channels) including:
-- Full track information with velocity
-- Events and behaviors
-- Memory summaries
-- Spatial context
-
-This allows the swarm to make intelligent, context-aware decisions.
+- Hardened ESP32 nodes
+- Strong intelligence stack
+- Rich structured data sharing (tracks, events, memory, spatial)
+- Swarm can react with real actions (scale power, security mode, etc.)
+- Live central dashboard + session logging
 
 ## Quick Start
 
@@ -21,4 +19,4 @@ pip install -r requirements.txt
 python run_full_pipeline.py
 ```
 
-Open http://localhost:8000 for the live central dashboard.
+Open http://localhost:8000 to see everything live.
