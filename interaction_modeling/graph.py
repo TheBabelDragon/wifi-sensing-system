@@ -1,9 +1,20 @@
+import numpy as np
+
 class InteractionGraph:
     def build(self, tracks):
         graph = {}
-        for i, t1 in enumerate(tracks):
-            for j, t2 in enumerate(tracks):
-                if i != j:
-                    dist = ((t1.get('centroid', [0])[0] - t2.get('centroid', [0])[0])**2 + (t1.get('centroid', [0])[1] - t2.get('centroid', [0])[1])**2)**0.5
-                    graph[(i, j)] = {'distance': dist, 'relation': 'proximity' if dist < 2 else 'distant'}
+        n = len(tracks)
+        for i in range(n):
+            for j in range(i + 1, n):
+                t1 = tracks[i]
+                t2 = tracks[j]
+                c1 = np.array(t1.get("centroid", (0, 0)))
+                c2 = np.array(t2.get("centroid", (0, 0)))
+                dist = float(np.linalg.norm(c1 - c2))
+                relation = "close" if dist < 2.0 else ("medium" if dist < 4.0 else "distant")
+                graph[(i, j)] = {
+                    "distance": round(dist, 2),
+                    "relation": relation,
+                    "interaction_score": max(0, 1.0 - (dist / 5.0))
+                }
         return graph
