@@ -1,9 +1,23 @@
 from aurora.adapter import AuroraAdapter
-import json
+import time
+import logging
+
+logger = logging.getLogger("swarm-bridge")
 
 class SwarmBridge:
-    def __init__(self, redis_url: str = None):
+    def __init__(self, redis_url: str = None, max_retries: int = 3):
         self.adapter = AuroraAdapter(redis_url=redis_url)
+        self.max_retries = max_retries
+
+    def _safe_publish(self, method, *args, **kwargs):
+        for attempt in range(self.max_retries):
+            try:
+                return method(*args, **kwargs)
+            except Exception as e:
+                logger.warning(f"Redis operation failed (attempt {attempt+1}): {e}")
+                time.sleep(0.2 * (attempt + 1))
+        logger.error("Max retries exceeded for Redis operation")
+        return None
 
     def send_occupancy_event(self, room: str, count: int, behavior: str = None):
         event = {
@@ -13,23 +27,13 @@ class SwarmBridge:
             "behavior": behavior,
             "source": "wifi-csi-sensing"
         }
-        self.adapter.publish_to_swarm("sensing:events", event)
-        self.adapter.update_swarm_state("sensing:last_occupancy", event)
+        self._safe_publish(self.adapter.publish_to_swarm, "sensing:events", event)
+        self._safe_publish(self.adapter.update_swarm_state, "sensing:last_occupancy", event)
 
-    def send_anomaly_event(self, location: str, severity: str = "medium"):
-        event = {
-            "type": "ANOMALY_NEAR_RIGS",
-            "location": location,
-            "severity": severity,
-            "source": "wifi-csi-sensing"
-        }
-        self.adapter.publish_to_swarm("sensing:alerts", event)
-
-    def send_full_context(self, tracks: list, events: list, behaviors: list, memory_profile: dict):
-        """Send rich structured context to the swarm (secure channel)."""
+    def send_full_context(self, tracks, events, behaviors, memory_profile):
         payload = {
             "type": "FULL_CONTEXT_UPDATE",
-            "timestamp": __import__('time').time(),
+            "timestamp": time.time(),
             "tracks": tracks,
             "events": events,
             "behaviors": behaviors,
@@ -39,11 +43,5 @@ class SwarmBridge:
             },
             "source": "wifi-csi-sensing"
         }
-        self.adapter.publish_to_swarm("sensing:context", payload)
-        self.adapter.update_swarm_state("sensing:latest_context", payload)
-
-    def send_thermal_context(self, avg_temp_proxy: float):
-        self.adapter.update_swarm_state("sensing:thermal_context", {
-            "avg_temp_proxy": avg_temp_proxy,
-            "timestamp": __import__('time').time()
-        })
+        self._safe_publish(self.adapter.publish_to_swarm, "sensing:context", payload)
+        self._safe_publish(self.adapter.update_swarm_state, "sensing:latest_context", payload)
