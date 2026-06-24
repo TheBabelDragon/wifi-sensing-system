@@ -1,0 +1,16 @@
+# WiFi CSI Spatial Intelligence Configuration
+# This file can be overridden by environment variables
+
+NODE_ID: "esp32_mining_hall_01"
+ROOM_NAME: "mining_hall"
+
+SIMULATION_FRAMES: 8
+DEMO_SLEEP: 0.35
+
+REDIS_URL: null
+
+MAX_TRACK_DISTANCE: 3.0
+AGENT_COOLDOWN: 25
+
+LOG_LEVEL: "INFO"
+STRUCTURED_LOGGING: false
