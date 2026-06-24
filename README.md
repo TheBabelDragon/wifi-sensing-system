@@ -1,14 +1,21 @@
 # WiFi CSI Spatial Intelligence System v1.1.0
 
-**Early bidirectional integration with aurora-swarm-btc is now active.**
+**Now with early bidirectional integration to aurora-swarm-btc.**
 
-## Important Disclaimer
+## Important Notice
 
-The command channel from swarm → sensing (`sensing/command_listener.py`) is in an early stage:
+The command channel (swarm → sensing) is in an early stage:
+- Currently unauthenticated
+- Intended for trusted/internal environments only
+- Future versions will include proper security controls
 
-- Commands are currently **unauthenticated** and minimally validated.
-- This channel should only be used in trusted/internal environments.
-- Do not expose it to untrusted networks without adding authentication and validation layers.
-- Future versions will include proper security controls.
+When running the demo, the system now listens for commands from the swarm side.
 
-Use responsibly.
+## Quick Start
+
+```bash
+docker compose up --build
+```
+
+Dashboard: http://localhost:8000
+Metrics: http://localhost:8001/metrics
