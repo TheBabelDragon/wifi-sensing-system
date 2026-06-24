@@ -4,31 +4,36 @@ class CalibrationEngine:
     def __init__(self):
         self.anchors = {}
         self.baseline = None
-        self.scale_factor = 1.0  # meters per voxel unit
-        self.room_bounds = (0, 10, 0, 10)  # x_min, x_max, y_min, y_max
+        self.scale_factor = 0.5  # voxel units to meters
+        self.drift_threshold = 0.15
+        self.last_drift_check = None
 
     def register_anchors(self, nodes):
         self.anchors = nodes
-        print(f"[Calibration] Registered {len(nodes)} anchors")
 
     def build_baseline(self, csi_stream):
         if not csi_stream:
             return
-        csi_arrays = [np.array(f.get('csi', [0]*32)) for f in csi_stream if f]
-        if csi_arrays:
-            self.baseline = np.mean(csi_arrays, axis=0)
-            print("[Calibration] Baseline built from stream")
+        arrays = []
+        for f in csi_stream:
+            if f and 'csi' in f:
+                arrays.append(np.array(f['csi']))
+        if arrays:
+            self.baseline = np.mean(arrays, axis=0)
 
     def calibrate(self, frame):
-        if self.baseline is None or not frame:
+        if self.baseline is None or frame is None:
             return frame
-        csi = np.array(frame.get('csi', [0]*32))
-        calibrated_csi = csi - self.baseline
-        frame['csi'] = calibrated_csi.tolist()
+        csi = np.array(frame.get('csi', []))
+        if len(csi) == len(self.baseline):
+            frame['csi'] = (csi - self.baseline).tolist()
+        # Simple drift detection
+        if self.last_drift_check is not None:
+            drift = np.mean(np.abs(csi - self.last_drift_check))
+            if drift > self.drift_threshold:
+                frame['drift_detected'] = True
+        self.last_drift_check = csi
         return frame
 
     def to_metric(self, voxel_coords):
-        # Simple linear mapping
-        x = voxel_coords[0] * self.scale_factor
-        y = voxel_coords[1] * self.scale_factor
-        return (x, y)
+        return (voxel_coords[0] * self.scale_factor, voxel_coords[1] * self.scale_factor)
