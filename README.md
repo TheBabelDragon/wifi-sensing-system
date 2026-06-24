@@ -1,24 +1,22 @@
 # WiFi CSI Spatial Intelligence System v1.1.0
 
-**Production-ready system** with Docker support.
+**Production-ready spatial intelligence platform** with Docker support.
 
-## Quick Start with Docker (Recommended)
+## Quick Start (Docker - Recommended)
 
 ```bash
 git clone https://github.com/TheBabelDragon/wifi-sensing-system.git
 cd wifi-sensing-system
-
-# Run everything (Python system + Redis)
 docker compose up --build
 ```
 
-Then open **http://localhost:8000** for the live central dashboard.
+Open **http://localhost:8000** for the live central dashboard.
 
-## Without Docker
+## Features
+- Hardened ESP32 nodes
+- Rich structured data sharing with aurora-swarm-btc
+- Central web dashboard
+- Automatic session logging
+- Docker + docker-compose ready
 
-```bash
-git clone https://github.com/TheBabelDragon/wifi-sensing-system.git
-cd wifi-sensing-system
-pip install -r requirements.txt
-python run_full_pipeline.py
-```
+Ready for real deployment.
