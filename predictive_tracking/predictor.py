@@ -2,30 +2,37 @@ import numpy as np
 
 class Predictor:
     def __init__(self):
-        self.track_states = {}  # id -> {'pos': (x,y), 'vel': (vx,vy)}
+        self.states = {}  # track_id -> {'pos': array, 'vel': array, 'cov': matrix}
 
     def predict(self, track):
-        track_id = track.get('id', 0)
-        if track_id not in self.track_states:
-            self.track_states[track_id] = {
-                'pos': track.get('centroid', (0,0)),
-                'vel': (0.1, 0.1)
+        tid = track.get('id')
+        if tid not in self.states:
+            pos = np.array(track.get('centroid', (0.0, 0.0)))
+            self.states[tid] = {
+                'pos': pos,
+                'vel': np.array([0.0, 0.0]),
+                'cov': np.eye(4) * 0.5
             }
-        state = self.track_states[track_id]
+
+        state = self.states[tid]
         # Simple constant velocity prediction
-        new_x = state['pos'][0] + state['vel'][0]
-        new_y = state['pos'][1] + state['vel'][1]
-        predicted = {
-            'id': track_id,
-            'predicted_pos': (new_x, new_y),
+        predicted_pos = state['pos'] + state['vel']
+
+        return {
+            'id': tid,
+            'predicted_pos': tuple(predicted_pos),
             'centroid': track.get('centroid'),
-            'speed': np.sqrt(state['vel'][0]**2 + state['vel'][1]**2)
+            'speed': float(np.linalg.norm(state['vel'])),
+            'velocity': tuple(state['vel'])
         }
-        return predicted
 
     def update(self, observation):
-        # In real Kalman this would correct velocity
-        track_id = observation.get('id')
-        if track_id in self.track_states:
-            self.track_states[track_id]['pos'] = observation.get('centroid', (0,0))
+        tid = observation.get('id')
+        if tid in self.states:
+            pos = np.array(observation.get('centroid', (0.0, 0.0)))
+            state = self.states[tid]
+            # Simple correction (like basic Kalman update)
+            innovation = pos - state['pos']
+            state['pos'] = state['pos'] + 0.7 * innovation
+            state['vel'] = 0.3 * state['vel'] + 0.7 * innovation
         return observation
