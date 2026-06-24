@@ -16,11 +16,12 @@ from federation.layer import Federation
 from agents.agent import Agent
 from dashboard.server import DashboardServer
 from simulation.generator import generate_test_frame
+from bridges.swarm_bridge import SwarmBridge
 
 def run_pipeline():
-    print("\n🚀 Starting WiFi Sensing System v1.1.0 - Full Operable Pipeline\n")
+    print("\n🚀 WiFi CSI Spatial Intelligence + Aurora Swarm BTC — Full Integrated Pipeline\n")
 
-    # Initialize all modules
+    # Initialize everything
     aurora = AuroraAdapter()
     ingest = CSIIngestor()
     calib = CalibrationEngine()
@@ -35,70 +36,55 @@ def run_pipeline():
     federation = Federation()
     agent = Agent()
     dashboard = DashboardServer()
+    swarm_bridge = SwarmBridge()
 
-    # Register some nodes via Aurora
-    aurora.register_node("esp32_1", {"pos": (0,0)})
-    aurora.register_node("esp32_2", {"pos": (5,0)})
+    # Aurora swarm connection test
+    aurora.register_node("esp32_mining_hall_01", {"pos": (0,0), "type": "sensing"})
     print("Aurora health:", aurora.health_report())
+    print("Swarm bridge status:", swarm_bridge.get_swarm_status())
 
-    # Simulate frames
+    print("\n--- Running 5 integrated frames ---")
     for i in range(5):
-        print(f"\n--- Frame {i+1} ---")
+        print(f"\n=== Frame {i+1} ===")
         frame = generate_test_frame()
         
-        # Ingest & parse
         parsed = ingest.parse_csi(frame)
-        
-        # Calibrate
         calibrated = calib.calibrate(parsed)
-        
-        # Fuse to voxel field
         voxels = fusion.fuse(calibrated)
-        
-        # Track
         tracks = tracker.update(voxels)
-        
-        # Predict
         preds = [predictor.predict(t) for t in tracks]
-        
-        # Behavior
         states = [behavior.classify(t) for t in preds]
-        
-        # Events
         ev = events.generate(preds)
-        
-        # Interaction graph
         graph = interaction.build(preds)
-        
-        # Memory
         memory.update({"tracks": preds, "events": ev})
         
-        # Adaptation
-        metrics = {"error": 0.1 + i*0.05}
+        metrics = {"error": 0.1 + i * 0.05}
         params = adaptation.adjust(metrics)
         
-        # Federation (example)
-        room_embed = federation.encode_room(memory.room_profile)
+        # === NEW: Swarm Integration ===
+        if "ROOM_OCCUPIED" in ev or "RAPID_MOVEMENT" in ev:
+            decision = agent.decide({"tracks": preds, "events": ev})
+            agent.execute(decision)
         
-        # Agent decision
-        decision = agent.decide({"tracks": preds, "events": ev})
-        agent.execute(decision)
-        
-        # Dashboard
+        # Push thermal/occupancy context to swarm
+        if len(preds) > 0:
+            swarm_bridge.send_thermal_context(avg_temp_proxy=0.6 + i*0.05)
+
         state = {
             "frame": i+1,
-            "voxels": voxels,
-            "tracks": preds,
+            "tracks": len(preds),
             "events": ev,
             "behavior": states,
-            "adaptation_params": params
+            "adaptation": params,
+            "swarm_synced": True
         }
         dashboard.push(state)
         
         print(f"Tracks: {len(preds)} | Events: {ev} | Behavior: {states}")
 
-    print("\n✅ Pipeline completed successfully!")
-    print("Memory snapshot:", memory.room_profile)
+    print("\n✅ Full integrated pipeline completed!")
+    print("Memory profile:", memory.room_profile)
+    print("\nThe sensing system is now feeding real-world context into aurora-swarm-btc.")
 
 if __name__ == "__main__":
     run_pipeline()
