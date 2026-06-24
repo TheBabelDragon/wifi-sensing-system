@@ -9,16 +9,18 @@ logger = logging.getLogger("sensing-command-listener")
 
 class SensingCommandListener:
     """
-    Listens for structured commands from aurora-swarm-btc via Redis.
+    Robust listener for commands coming from aurora-swarm-btc.
 
-    This enables true bidirectional communication:
-    - Sensing system sends rich context + heartbeats to the swarm
-    - Swarm can send commands back (scale_down, security_mode, scale_up, etc.)
+    Features:
+    - Registers handlers for specific command types
+    - Graceful error handling per command
+    - Clear logging
+    - Default handlers for common swarm commands
 
     DISCLAIMER:
-    This is an early-stage bidirectional control channel.
-    Commands are currently unauthenticated and minimally validated.
-    Use only in trusted/internal environments.
+    This is an early bidirectional control channel.
+    Commands are currently unauthenticated.
+    Use only in trusted environments.
     """
 
     def __init__(self, redis_url: Optional[str] = None):
@@ -27,36 +29,34 @@ class SensingCommandListener:
         self.pubsub = self.r.pubsub()
         self.handlers: Dict[str, Callable] = {}
 
-        # Register default handlers for common swarm commands
+        # Default handlers
         self.register_handler("scale_down", self._handle_scale_down)
         self.register_handler("security_mode", self._handle_security_mode)
         self.register_handler("scale_up", self._handle_scale_up)
 
     def register_handler(self, command_type: str, handler: Callable[[Dict[str, Any]], None]):
-        """Register a handler function for a specific command type."""
+        """Register a handler for a command type."""
         self.handlers[command_type] = handler
 
     def _handle_scale_down(self, command: Dict[str, Any]):
         factor = command.get("factor", 0.7)
-        logger.warning(f"[Command] scale_down received | factor={factor}")
-        # Placeholder for future: could reduce CSI sampling rate or fusion sensitivity
+        logger.warning(f"[Command Received] scale_down | factor={factor}")
 
     def _handle_security_mode(self, command: Dict[str, Any]):
         duration = command.get("duration_minutes", 10)
-        logger.warning(f"[Command] SECURITY_MODE activated | duration={duration}min")
-        # Placeholder for future: could increase tracking resolution + event sensitivity
+        logger.warning(f"[Command Received] SECURITY_MODE | duration={duration}min")
 
     def _handle_scale_up(self, command: Dict[str, Any]):
         factor = command.get("factor", 1.2)
-        logger.info(f"[Command] scale_up received | factor={factor}")
+        logger.info(f"[Command Received] scale_up | factor={factor}")
 
     def _default_handler(self, command: Dict[str, Any]):
-        logger.info(f"[Command] Unhandled command type: {command}")
+        logger.info(f"[Command Received] Unhandled: {command}")
 
     def listen(self):
-        """Start listening for commands on the Redis pub/sub channel."""
+        """Start listening for commands."""
         self.pubsub.psubscribe("aurora:swarm:commands")
-        logger.info("Bidirectional command listener started (listening on aurora:swarm:commands)")
+        logger.info("Command listener active on aurora:swarm:commands")
 
         for message in self.pubsub.listen():
             if message['type'] == 'pmessage':
@@ -71,7 +71,7 @@ class SensingCommandListener:
                 try:
                     handler(command)
                 except Exception as e:
-                    logger.error(f"Error executing handler for {cmd_type}: {e}")
+                    logger.error(f"Handler error for '{cmd_type}': {e}")
 
 if __name__ == "__main__":
     listener = SensingCommandListener()
