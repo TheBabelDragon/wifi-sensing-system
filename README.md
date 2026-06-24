@@ -1,10 +1,14 @@
 # WiFi CSI Spatial Intelligence System v1.1.0
 
-**Fully hardened, production-oriented spatial intelligence platform** with ESP32 edge nodes and central intelligence.
+**Fully hardened production platform** with professional ESP32 nodes, central intelligence, live web dashboard, and automatic session logging.
 
-## New: Central Web Dashboard
+## Highlights
 
-When running `python run_full_pipeline.py`, a FastAPI dashboard is automatically started at **http://localhost:8000** showing live system state.
+- Hardened ESP32 nodes (Watchdog + NVS + beautiful live UI)
+- Robust Python stack with centralized config
+- **Central Web Dashboard** at http://localhost:8000
+- Automatic session logging to `logs/`
+- Direct integration with aurora-swarm-btc
 
 ## Quick Start
 
@@ -15,12 +19,6 @@ pip install -r requirements.txt
 python run_full_pipeline.py
 ```
 
-## Key Features
+Open http://localhost:8000 while it's running for the live central view.
 
-- Hardened ESP32 nodes with professional live web UI + Watchdog + persistent config
-- Robust Python backend with centralized config and logging
-- Optional central FastAPI dashboard
-- Direct integration with aurora-swarm-btc
-- Multi-node capable
-
-Ready for real deployment and monitoring.
+Ready for serious deployment.
