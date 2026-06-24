@@ -23,7 +23,7 @@ except ImportError:
 from utils.session_logger import SessionLogger
 
 # Core imports
-# (keeping imports clean)
+# ... (imports remain)
 
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
@@ -51,7 +51,7 @@ session_logger = SessionLogger()
 def run_pipeline():
     logger.info("="*70)
     logger.info("  WiFi CSI Spatial Intelligence System v1.1.0")
-    logger.info("  Session logs → " + session_logger.get_log_path())
+    logger.info("  Sending rich structured context to aurora-swarm-btc")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -76,7 +76,7 @@ def run_pipeline():
         def start_web():
             uvicorn.run(web_app, host="0.0.0.0", port=8000, log_level="warning")
         threading.Thread(target=start_web, daemon=True).start()
-        logger.info("Central dashboard running at http://localhost:8000")
+        logger.info("Central dashboard: http://localhost:8000")
 
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
         raw = generate_test_frame()
@@ -95,6 +95,15 @@ def run_pipeline():
             decision = agent.decide({"tracks": preds, "events": evs})
             agent.execute(decision)
 
+        # Send rich structured context to the swarm
+        if frame_idx % 2 == 0:
+            swarm_bridge.send_full_context(
+                tracks=preds,
+                events=evs,
+                behaviors=behaviors,
+                memory_profile=memory.room_profile
+            )
+
         state = {
             "frame": frame_idx,
             "tracks": len(preds),
@@ -104,16 +113,12 @@ def run_pipeline():
         }
         dashboard.push(state)
 
-        # Send periodic health to swarm
-        if frame_idx % 3 == 0:
-            swarm_bridge.send_thermal_context(round(len(preds) * 0.4, 2))
-
         session_logger.log({"frame": frame_idx, "tracks": len(preds), "events": evs})
 
         render_voxel_field(voxels, preds)
         time.sleep(config.DEMO_SLEEP)
 
-    logger.info("\nSession complete. Logs saved.")
+    logger.info("\nSession complete. Rich context was sent to the swarm.")
 
 if __name__ == "__main__":
     run_pipeline()
