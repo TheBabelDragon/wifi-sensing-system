@@ -1,55 +1,38 @@
 # WiFi CSI Spatial Intelligence System v1.1.0 + Aurora Swarm BTC
 
-**Fully operational, real-world demonstrational spatial intelligence system** ready for ESP32 deployment and integration with your Bitcoin mining swarm.
+**Fully operational spatial intelligence system** with powerful ESP32 nodes featuring **built-in live web viewing**.
 
-This is a complete end-to-end cognition stack:
+## ESP32 Live Viewing (New)
 
-Perception → Understanding → Decision → Action (in aurora-swarm-btc)
+Each ESP32 node now runs a built-in web server.
 
-## Quick Demo (Recommended)
+After flashing, simply open:
+
+```
+http://<ESP32-IP-ADDRESS>/
+```
+
+You get a beautiful, auto-refreshing live dashboard showing real-time CSI data, RSSI, channel, and packet statistics — perfect for deployment, debugging, and live demonstrations.
+
+## Quick Start
 
 ```bash
-git clone https://github.com/TheBabelDragon/wifi-sensing-system.git
-cd wifi-sensing-system
 python run_full_pipeline.py
 ```
 
-You will see a rich, visual demonstration including:
-- Voxel field generation with ASCII visualization
+Flash ESP32 nodes using `esp32/esp32_csi_udp_sender.ino` (see `esp32/README.md`).
+
+The system now provides end-to-end WiFi tracking with live visibility at both the edge (ESP32 web UI) and the center (Python pipeline + visualization).
+
+## Full Capabilities
+
+- Real CSI capture on ESP32
+- Live web dashboard per node
+- UDP streaming to central intelligence stack
+- Voxel-based spatial reconstruction
 - Multi-object tracking with velocity
-- Behavior classification
-- Event & anomaly detection
+- Behavior understanding & event detection
 - Intelligent agent decisions
-- Direct context pushing to aurora-swarm-btc
+- Direct integration with aurora-swarm-btc mining swarm
 
-## ESP32 Hardware Support
-
-Flash `esp32/esp32_csi_udp_sender.ino` using Arduino IDE (see `esp32/README.md`).
-The Python pipeline automatically receives live data from real ESP32 nodes via UDP.
-
-## Full Architecture
-
-All layers are fully implemented with fine-detail logic:
-- Ingestion (UDP + simulation)
-- Calibration + drift detection
-- Fusion (Gaussian voxel fields)
-- Tracking with association & velocity
-- Predictive tracking (Kalman-style)
-- Behavior understanding
-- Event engine
-- Interaction modeling
-- Memory & autonomous adaptation
-- Federation
-- Intelligent Agent with swarm policies
-- Dashboard + visualization
-- Aurora Swarm Bridge (Redis)
-
-## Integration with aurora-swarm-btc
-
-Events and decisions from the physical space are pushed into the mining swarm’s control bus, enabling context-aware mining operations (power scaling, security alerts, etc.).
-
-## Related Repo
-
-[aurora-swarm-btc](https://github.com/TheBabelDragon/aurora-swarm-btc)
-
-**They yearn for the mines. Now they can see who is near them.**
+Ready for real-world deployment.
