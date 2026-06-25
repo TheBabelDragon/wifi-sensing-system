@@ -1,12 +1,13 @@
 /*
-  ESP32 CSI Node - Refined Hybrid Firmware (Final Polish for Stage 2)
+  ESP32 CSI Node - Final Refined Hybrid Firmware
 
-  Features:
-  - Passive CSI sensing (always on)
-  - Multiple transport options (ESP-NOW primary for low interference)
-  - Optional WiFi (only when needed)
-  - Working web dashboard when WiFi is enabled
-  - Basic ESP-NOW command receiving
+  Design Philosophy:
+  - CSI sensing is always passive
+  - WiFi is optional (only when full connectivity is needed)
+  - ESP-NOW is preferred for local low-interference communication
+  - LoRa/Meshtastic is preferred for long-range
+
+  This firmware is production-oriented for hybrid deployments.
 */
 
 #include <WiFi.h>
@@ -28,7 +29,7 @@ const char* wifi_password = "YOUR_WIFI_PASSWORD";
 
 const int STATUS_LED = 2;
 
-// ================== TRANSPORT ==================
+// ================== TRANSPORT CONTROL ==================
 bool use_wifi = false;
 bool use_esp_now = true;
 bool use_lora = false;
@@ -121,7 +122,7 @@ void setup() {
   delay(600);
   pinMode(STATUS_LED, OUTPUT);
 
-  Serial.println("\n=== ESP32 CSI Hybrid Node ===");
+  Serial.println("\n=== ESP32 CSI Hybrid Node (Refined) ===");
 
   preferences.begin("csi-node", false);
   if (preferences.isKey("node_id")) node_id = preferences.getString("node_id", node_id);
