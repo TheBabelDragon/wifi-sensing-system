@@ -1,13 +1,12 @@
 /*
-  ESP32 CSI Node - Refined Hybrid Firmware with ESP-NOW
+  ESP32 CSI Node - Well-Refined Hybrid Firmware
 
-  ESP-NOW is now a first-class low-interference transport.
-  It works without joining a traditional WiFi network.
+  Transports (in order of preference for low interference):
+  1. ESP-NOW (local, connectionless, good for mesh)
+  2. LoRa / Meshtastic (long range)
+  3. WiFi UDP (only when internet/gateway reachability is needed)
 
-  Features:
-  - Send CSI summaries or events via ESP-NOW
-  - Receive commands or data from other ESP-NOW nodes
-  - Optional encryption support (commented)
+  ESP-NOW now supports basic command receiving.
 */
 
 #include <WiFi.h>
@@ -35,37 +34,36 @@ bool use_esp_now = true;
 bool use_lora = false;
 bool use_meshtastic_bridge = false;
 
-// ESP-NOW peer (broadcast for simplicity, or specific MAC)
 uint8_t broadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("[ESP-NOW] Send status: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+  // Optional: log send status
 }
 
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-  String received = "";
-  for (int i = 0; i < len; i++) {
-    received += (char)incomingData[i];
-  }
-  Serial.printf("[ESP-NOW] Received from %02X:%02X:%02X:%02X:%02X:%02X : %s\n",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], received.c_str());
+  String msg = "";
+  for (int i = 0; i < len; i++) msg += (char)incomingData[i];
 
-  // TODO: Add logic to act on received ESP-NOW messages
-  // Example: if (received.startsWith("CMD:")) { ... }
+  Serial.printf("[ESP-NOW] From %02X:%02X:%02X:%02X:%02X:%02X → %s\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], msg.c_str());
+
+  // Basic command handling example
+  if (msg.startsWith("LED_ON")) {
+    digitalWrite(STATUS_LED, HIGH);
+  } else if (msg.startsWith("LED_OFF")) {
+    digitalWrite(STATUS_LED, LOW);
+  } else if (msg.startsWith("STATUS")) {
+    Serial.printf("[Node] Packets: %d | RSSI: %d\n", packet_count, rssi);
+  }
 }
 
 void send_via_esp_now(String payload) {
   uint8_t data[250];
   payload.getBytes(data, sizeof(data));
-
-  esp_err_t result = esp_now_send(broadcastAddress, data, payload.length());
-  if (result != ESP_OK) {
-    Serial.println("[ESP-NOW] Send failed");
-  }
+  esp_now_send(broadcastAddress, data, payload.length());
 }
 
-// ================== LORA / MESHTASTIC ==================
+// ================== OTHER TRANSPORTS ==================
 void send_via_lora(String payload) {
   Serial.println("[LoRa] Would send: " + payload);
 }
@@ -121,7 +119,7 @@ void setup() {
   delay(600);
   pinMode(STATUS_LED, OUTPUT);
 
-  Serial.println("\n=== ESP32 CSI Hybrid Node (ESP-NOW Refined) ===");
+  Serial.println("\n=== ESP32 CSI Hybrid Node (ESP-NOW + Optional WiFi) ===");
 
   preferences.begin("csi-node", false);
   if (preferences.isKey("node_id")) node_id = preferences.getString("node_id", node_id);
@@ -140,10 +138,9 @@ void setup() {
     udp.begin(4210);
   }
 
-  // ESP-NOW Setup
   if (use_esp_now) {
     if (esp_now_init() != ESP_OK) {
-      Serial.println("[ESP-NOW] Initialization failed");
+      Serial.println("[ESP-NOW] Init failed");
     } else {
       esp_now_register_send_cb(OnDataSent);
       esp_now_register_recv_cb(OnDataRecv);
@@ -152,17 +149,13 @@ void setup() {
       memset(&peerInfo, 0, sizeof(peerInfo));
       memcpy(peerInfo.peer_addr, broadcastAddress, 6);
       peerInfo.channel = 0;
-      peerInfo.encrypt = false;   // Set true + LMK if you want encryption
+      peerInfo.encrypt = false;
 
-      if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        Serial.println("[ESP-NOW] Failed to add broadcast peer");
-      } else {
-        Serial.println("[ESP-NOW] Broadcast peer added");
-      }
+      esp_now_add_peer(&peerInfo);
+      Serial.println("[ESP-NOW] Ready (broadcast)");
     }
   }
 
-  // CSI (always passive)
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
 
@@ -182,8 +175,8 @@ void setup() {
   esp_task_wdt_init(5, true);
   esp_task_wdt_add(NULL);
 
-  Serial.println("[System] Node ready with ESP-NOW");
-  last_status = use_esp_now ? "ESP-NOW Active" : "Passive Mode";
+  Serial.println("[System] Node ready");
+  last_status = use_esp_now ? "ESP-NOW Mode" : "Passive CSI";
   digitalWrite(STATUS_LED, HIGH);
 }
 
