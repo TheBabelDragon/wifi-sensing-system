@@ -1,18 +1,25 @@
 /*
   ESP32 CSI Node - Modular Hybrid Firmware (Stage 2)
 
-  LoRa Module Recommendations:
-  - SX1262 (recommended) or SX1276
-  - Example wiring (adjust to your board):
-      NSS  = GPIO 5
-      DIO1 = GPIO 2
-      RST  = GPIO 15
-      BUSY = GPIO 4
+  === How to use different transports ===
 
-  Meshtastic Integration Strategy:
-  - Run Meshtastic on dedicated long-range nodes
-  - Use gateway nodes to bridge Meshtastic data into the system
-  - Send summarized data only over LoRa (not raw CSI)
+  WiFi UDP (default):
+    - Set use_lora = false and use_meshtastic_bridge = false
+
+  LoRa mode:
+    - Set use_lora = true
+    - Implement send_via_lora() using RadioLib
+
+  Meshtastic bridge mode:
+    - Set use_meshtastic_bridge = true
+    - Implement send_via_meshtastic() to forward data to a Meshtastic gateway
+
+  Recommended LoRa Module: SX1262 or SX1276
+  Example pins (adjust to your board):
+    NSS  = 5
+    DIO1 = 2
+    RST  = 15
+    BUSY = 4
 */
 
 #include <WiFi.h>
@@ -33,19 +40,19 @@ const char* wifi_password = "YOUR_WIFI_PASSWORD";
 
 const int STATUS_LED = 2;
 
-// ================== LORA / MESHTASTIC ==================
+// ================== TRANSPORT FLAGS ==================
 bool use_lora = false;
 bool use_meshtastic_bridge = false;
 
 void send_via_lora(String payload) {
   Serial.println("[LoRa] Would send: " + payload);
-  // Future: Implement with RadioLib
+  // TODO: Implement with RadioLib
   // radio.transmit(payload);
 }
 
 void send_via_meshtastic(String payload) {
   Serial.println("[Meshtastic] Would forward: " + payload);
-  // Future: Bridge via MQTT, serial, or Meshtastic API
+  // TODO: Bridge via MQTT, serial, or Meshtastic API
 }
 // =======================================================
 
