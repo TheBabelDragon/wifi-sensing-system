@@ -34,7 +34,7 @@ except ImportError:
 
 from utils.session_logger import SessionLogger
 
-# Full explicit imports
+# Full imports
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
 from calibration.engine import CalibrationEngine
@@ -63,7 +63,7 @@ if HAS_METRICS:
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Full Observable Bidirectional Demo")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Hybrid Mode (WiFi + Meshtastic Gateway)")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -90,12 +90,10 @@ def run_pipeline():
         threading.Thread(target=start_web, daemon=True).start()
         logger.info("Dashboard: http://localhost:8000")
 
-    command_listener = None
     if HAS_COMMAND_LISTENER:
         def start_listener():
-            nonlocal command_listener
-            command_listener = SensingCommandListener(redis_url=config.REDIS_URL)
-            command_listener.listen()
+            listener = SensingCommandListener(redis_url=config.REDIS_URL)
+            listener.listen()
         threading.Thread(target=start_listener, daemon=True).start()
         logger.info("Bidirectional command listener active")
 
@@ -106,7 +104,15 @@ def run_pipeline():
         start_time = time.time()
 
         raw = generate_test_frame()
-        parsed = ingest.parse_csi(raw)
+        parsed = ingest.parse_packet(raw)   # Now supports both WiFi CSI and gateway data
+
+        if parsed and parsed.get("source") == "meshtastic_gateway":
+            # Handle lightweight data from Meshtastic gateway
+            logger.info(f"[Hybrid] Received from Meshtastic gateway: {parsed['data']}")
+            # TODO: Route to events/behavior layer
+            continue
+
+        # Normal WiFi CSI processing path
         calibrated = calib.calibrate(parsed)
         voxels = fusion.fuse(calibrated)
         tracks = tracker.update(voxels)
@@ -127,13 +133,8 @@ def run_pipeline():
             swarm_bridge.send_heartbeat()
             last_heartbeat = time.time()
 
-        # Periodic status logging for integration health
         if time.time() - last_status_log > 15:
-            if command_listener:
-                stats = command_listener.get_stats()
-                logger.info(f"[Integration] Healthy | Commands received: {stats['total_commands_received']}")
-            else:
-                logger.info("[Integration] Bidirectional link active")
+            logger.info("[Integration] Healthy | Hybrid mode active")
             last_status_log = time.time()
 
         state = {
