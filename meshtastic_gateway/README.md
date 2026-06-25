@@ -1,22 +1,22 @@
 # Meshtastic Gateway
 
-This folder contains examples and guidance for bridging data from pre-assembled Meshtastic devices (such as W10) into the central WiFi CSI system.
+Examples and guidance for integrating pre-assembled Meshtastic devices (W10, etc.) into the system.
 
-## Recommended Approach
+## Recommended Flow
 
-- Use official Meshtastic firmware on long-range nodes
-- Deploy one or more gateway nodes that receive from the Meshtastic mesh
-- Forward only summarized/useful data to the central system
+1. Meshtastic nodes send lightweight summarized data
+2. Gateway receives via MQTT (or serial)
+3. Gateway forwards useful data to the central CSI system
 
 ## Example Files
 
-- `example_bridge.py`: Basic structure for a gateway bridge
+- `example_bridge.py`: Structured gateway with MQTT support and message filtering
 
-## Data Recommendations
+## Suggested Message Types from Meshtastic
 
-Send from Meshtastic nodes:
-- Events and alerts
-- Occupancy / presence summaries
-- Node status / heartbeats
+- `occupancy`
+- `event`
+- `alert`
+- `heartbeat`
 
-Do not send raw CSI data over Meshtastic.
+See `example_bridge.py` for the current structure.
