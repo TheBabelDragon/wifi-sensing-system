@@ -2,32 +2,33 @@
 
 **Stage 2 in Progress**
 
-## Current Status
-
-- Stage 1 (Modular foundation): Complete
-- Stage 2 (LoRa scaffolding + Meshtastic guidance): In progress
-
 ## Stage 2 Progress
 
-- Added basic LoRa transport scaffolding in ESP32 firmware
-- Added placeholders for `send_via_lora()` and `send_via_meshtastic()`
-- Transport selection logic started in `send_payload()`
-- Still fully backward compatible with WiFi UDP
+- Improved LoRa scaffolding with better comments and example pinouts (SX1262/SX1276)
+- Clearer transport selection logic in firmware
+- Added recommended Meshtastic bridging strategy
 
-## Meshtastic Bridging Guidance (Draft)
+## Recommended Meshtastic Bridging Strategy
 
-Recommended approach:
-- Run Meshtastic on dedicated long-range nodes
-- Use a gateway node that bridges Meshtastic → MQTT or UDP
-- The gateway can be a regular ESP32 or a small server
-- Send summarized data (tracks, events, alerts) rather than raw CSI
+Best practice:
 
-## Next in Stage 2
+1. Run full Meshtastic firmware on long-range / off-grid nodes
+2. Deploy gateway node(s) that:
+   - Connect to the Meshtastic mesh (MQTT or serial)
+   - Forward summarized intelligence (tracks, events, alerts) to the central system
+3. Keep raw CSI processing on WiFi-capable nodes only
 
-- Improve LoRa pin configuration examples
-- Add more detailed Meshtastic bridging examples
-- Finalize transport selection logic
+This leverages Meshtastic's mature mesh capabilities while keeping the core intelligence layer clean and transport-agnostic.
+
+## Current Firmware State
+
+The ESP32 firmware now includes:
+- Placeholder functions: `send_via_lora()` and `send_via_meshtastic()`
+- Transport selection inside `send_payload()`
+- Clear comments for common LoRa modules
+
+Fully backward compatible with standard WiFi UDP operation.
 
 ---
 
-See full architecture in earlier sections of this document.
+See full node types and hybrid patterns in the sections above.
