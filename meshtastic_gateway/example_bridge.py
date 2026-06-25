@@ -1,15 +1,14 @@
 """
-Meshtastic Gateway Bridge - Refined Example
+Meshtastic Gateway Bridge - Final Refined Version
 
-Purpose: Bridge data from pre-assembled Meshtastic devices into the central system.
+This is a clean, well-structured starting point for bridging
+pre-assembled Meshtastic devices into the central CSI system.
 
-Features:
-- MQTT support (most common with Meshtastic)
-- Message type filtering
-- Clean structure and error handling
-- Ready to be extended
-
-Recommended: Only forward summarized/useful data (events, occupancy, alerts, heartbeats).
+Key design choices:
+- Only forward useful summarized data
+- MQTT is the recommended connection method
+- Clear separation between receiving, processing, and forwarding
+- Easy to extend with real forwarding logic
 """
 
 import json
@@ -28,7 +27,7 @@ class MeshtasticGateway:
 
     def connect_mqtt(self):
         if mqtt is None:
-            print("[Gateway] paho-mqtt not available - running in simulation mode")
+            print("[Gateway] Running without paho-mqtt (simulation mode)")
             return False
 
         self.client = mqtt.Client()
@@ -36,35 +35,31 @@ class MeshtasticGateway:
 
         try:
             self.client.connect(self.mqtt_broker, self.mqtt_port, 60)
-            self.client.subscribe("msh/+/json/#")  # Common Meshtastic topic pattern
+            self.client.subscribe("msh/+/json/#")
             self.client.loop_start()
-            print(f"[Gateway] Connected to MQTT broker at {self.mqtt_broker}")
+            print(f"[Gateway] Connected to MQTT at {self.mqtt_broker}")
             return True
         except Exception as e:
-            print(f"[Gateway] MQTT connection failed: {e}")
+            print(f"[Gateway] Connection failed: {e}")
             return False
 
     def on_mqtt_message(self, client, userdata, msg):
         try:
-            payload = msg.payload.decode()
-            data = json.loads(payload)
+            data = json.loads(msg.payload.decode())
             self.process_message(data)
         except Exception as e:
-            print(f"[Gateway] Failed to parse message: {e}")
+            print(f"[Gateway] Parse error: {e}")
 
     def process_message(self, data):
         msg_type = data.get("type", "unknown")
 
-        # Only forward useful message types
         if msg_type in ["occupancy", "event", "alert", "heartbeat"]:
-            print(f"[Gateway] Useful message received: {msg_type}")
+            print(f"[Gateway] Processing {msg_type}")
             self.forward_to_central(data)
-        else:
-            pass  # Ignore other messages
 
     def forward_to_central(self, data):
-        print(f"[Gateway] Forwarding to central system: {data}")
-        # TODO: Implement actual forwarding (UDP / MQTT / HTTP)
+        print(f"[Gateway] Forwarding: {data}")
+        # TODO: Implement actual transport (UDP/MQTT/HTTP)
 
     def run(self):
         print("[Gateway] Starting...")
@@ -72,14 +67,9 @@ class MeshtasticGateway:
 
         try:
             while True:
-                if not connected:
-                    # Simulation mode
-                    time.sleep(5)
-                    print("[Gateway] (Simulation) No Meshtastic connection")
-                else:
-                    time.sleep(1)
+                time.sleep(1)
         except KeyboardInterrupt:
-            print("[Gateway] Shutting down...")
+            print("[Gateway] Shutting down")
 
 if __name__ == "__main__":
     gateway = MeshtasticGateway()
