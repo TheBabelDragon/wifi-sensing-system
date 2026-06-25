@@ -1,21 +1,18 @@
 /*
   ESP32 CSI Node - Modular Hybrid Firmware (Stage 2)
 
-  Stage 1: Modular structure (Complete)
-  Stage 2: LoRa scaffolding + Meshtastic bridging
+  LoRa Module Recommendations:
+  - SX1262 (recommended) or SX1276
+  - Example wiring (adjust to your board):
+      NSS  = GPIO 5
+      DIO1 = GPIO 2
+      RST  = GPIO 15
+      BUSY = GPIO 4
 
-  LoRa Hardware Recommendations:
-  - SX1262 or SX1276 module
-  - Common pinout example:
-      NSS  = 5
-      DIO1 = 2
-      RST  = 15
-      BUSY = 4
-
-  Meshtastic Strategy:
-  - Preferred for long-range mesh
-  - Run Meshtastic on dedicated nodes
-  - Bridge data via gateway (MQTT / UDP / Serial)
+  Meshtastic Integration Strategy:
+  - Run Meshtastic on dedicated long-range nodes
+  - Use gateway nodes to bridge Meshtastic data into the system
+  - Send summarized data only over LoRa (not raw CSI)
 */
 
 #include <WiFi.h>
@@ -36,23 +33,21 @@ const char* wifi_password = "YOUR_WIFI_PASSWORD";
 
 const int STATUS_LED = 2;
 
-// ================== LORA / MESHTASTIC (Stage 2) ==================
-// Set these flags to enable alternative transports
+// ================== LORA / MESHTASTIC ==================
 bool use_lora = false;
 bool use_meshtastic_bridge = false;
 
-// Placeholder functions - implement with RadioLib or Meshtastic API later
 void send_via_lora(String payload) {
-  Serial.println("[LoRa] Would transmit: " + payload);
-  // Example with RadioLib:
+  Serial.println("[LoRa] Would send: " + payload);
+  // Future: Implement with RadioLib
   // radio.transmit(payload);
 }
 
 void send_via_meshtastic(String payload) {
   Serial.println("[Meshtastic] Would forward: " + payload);
-  // Could use MQTT, serial, or Meshtastic API
+  // Future: Bridge via MQTT, serial, or Meshtastic API
 }
-// ============================================================
+// =======================================================
 
 WiFiUDP udp;
 WebServer server(80);
@@ -69,7 +64,6 @@ void send_payload(String payload) {
   } else if (use_meshtastic_bridge) {
     send_via_meshtastic(payload);
   } else {
-    // Default transport: WiFi UDP
     udp.beginPacket(target_ip.c_str(), target_port);
     udp.print(payload);
     udp.endPacket();
@@ -94,7 +88,7 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
   send_payload(payload);
 }
 
-// Web dashboard + setup/loop kept compatible with Stage 1
+// Web dashboard + setup/loop (kept compatible)
 
 void setup() {
   Serial.begin(115200);
