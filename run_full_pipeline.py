@@ -61,9 +61,25 @@ session_logger = SessionLogger()
 if HAS_METRICS:
     metrics = get_metrics()
 
+def handle_gateway_data(data):
+    """Basic handling for data coming from Meshtastic gateways."""
+    msg_type = data.get("type", "unknown")
+    logger.info(f"[Hybrid] Gateway message: type={msg_type}")
+
+    # Example: Convert to simple event and feed into EventEngine
+    if msg_type in ["occupancy", "event", "alert"]:
+        # Create a minimal event-like structure
+        fake_event = {
+            "type": msg_type,
+            "source": "meshtastic_gateway",
+            "data": data
+        }
+        # In a full implementation this would go through EventEngine
+        logger.info(f"[Hybrid] Processed gateway {msg_type}")
+
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Hybrid Mode (WiFi + Meshtastic Gateway)")
+    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Hybrid Mode (WiFi + Meshtastic)")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
@@ -104,15 +120,13 @@ def run_pipeline():
         start_time = time.time()
 
         raw = generate_test_frame()
-        parsed = ingest.parse_packet(raw)   # Now supports both WiFi CSI and gateway data
+        parsed = ingest.parse_packet(raw)
 
         if parsed and parsed.get("source") == "meshtastic_gateway":
-            # Handle lightweight data from Meshtastic gateway
-            logger.info(f"[Hybrid] Received from Meshtastic gateway: {parsed['data']}")
-            # TODO: Route to events/behavior layer
+            handle_gateway_data(parsed["data"])
             continue
 
-        # Normal WiFi CSI processing path
+        # Normal rich WiFi CSI path
         calibrated = calib.calibrate(parsed)
         voxels = fusion.fuse(calibrated)
         tracks = tracker.update(voxels)
