@@ -7,12 +7,9 @@ logger = logging.getLogger("csi-ingestor")
 
 class CSIIngestor:
     """
-    Resilient UDP ingestor for ESP32 CSI data.
-
-    Features:
-    - Automatic socket reconnection
-    - Retry logic with backoff
-    - Graceful fallback to simulation
+    Flexible ingestor that can accept data from multiple sources:
+    - WiFi CSI nodes (rich context)
+    - Meshtastic gateways (lightweight summarized data)
     """
 
     def __init__(self, udp_port: int = 4210, max_retries: int = 5):
@@ -30,7 +27,7 @@ class CSIIngestor:
             self.sock.bind(("0.0.0.0", self.udp_port))
             self.sock.settimeout(0.8)
             self._backoff = 1
-            logger.info(f"Listening for ESP32 CSI on UDP port {self.udp_port}")
+            logger.info(f"Listening on UDP port {self.udp_port}")
         except Exception as e:
             logger.error(f"Failed to bind UDP socket: {e}")
             self.sock = None
@@ -51,24 +48,29 @@ class CSIIngestor:
             except socket.timeout:
                 return None
             except Exception as e:
-                logger.warning(f"Socket error (attempt {attempt+1}): {e}")
+                logger.warning(f"Socket error: {e}")
                 time.sleep(min(self._backoff, 5))
                 self._backoff = min(self._backoff * 2, 5)
                 self._setup_socket()
 
-        logger.error("Max retries exceeded on UDP read")
+        logger.error("Max retries exceeded")
         self._setup_socket()
         return None
 
-    def parse_csi(self, packet):
+    def parse_packet(self, packet):
         if packet is None:
+            return None
+
+        # Detect if this is from a Meshtastic gateway (lightweight)
+        if "type" in packet and packet["type"] in ["occupancy", "event", "alert", "heartbeat"]:
             return {
-                "node": "simulated",
-                "csi": [0.4] * 32,
-                "rssi": -58,
-                "timestamp": "sim"
+                "source": "meshtastic_gateway",
+                "data": packet
             }
+
+        # Otherwise treat as normal CSI node data
         return {
+            "source": "wifi_csi_node",
             "node": packet.get("node", "unknown"),
             "csi": packet.get("csi", [0.0]*32),
             "rssi": packet.get("rssi", -60),
@@ -78,4 +80,6 @@ class CSIIngestor:
     def stream(self):
         while True:
             packet = self.read_packet()
-            yield self.parse_csi(packet)
+            parsed = self.parse_packet(packet)
+            if parsed:
+                yield parsed
