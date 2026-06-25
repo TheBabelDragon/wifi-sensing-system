@@ -1,68 +1,80 @@
 """
-Meshtastic Gateway Bridge - Conceptual Example
+Meshtastic Gateway Bridge Example
 
-Purpose:
-- Receive data from a Meshtastic mesh (via MQTT or serial)
-- Parse relevant messages
-- Forward summarized data to the central CSI system
+This example shows a practical structure for bridging data from
+pre-assembled Meshtastic devices into the central system.
 
-This is a starting template. Real implementation would depend on how
-you connect to your Meshtastic device (MQTT is usually easiest).
+Common connection methods:
+- MQTT (most common with Meshtastic)
+- Serial
+- Meshtastic API
 
-Recommended data from Meshtastic nodes:
-- Events / Alerts
-- Occupancy counts
-- Simple presence detection
-- Heartbeats / node status
-
-Do NOT send raw CSI or large binary data over Meshtastic.
+This version includes a commented MQTT example.
 """
 
 import json
 import time
 
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    mqtt = None
+
 class MeshtasticGateway:
-    def __init__(self, central_host="localhost", central_port=4210):
-        self.central_host = central_host
-        self.central_port = central_port
-        print("[Gateway] Initialized")
+    def __init__(self, mqtt_broker="localhost", mqtt_port=1883):
+        self.mqtt_broker = mqtt_broker
+        self.mqtt_port = mqtt_port
+        self.client = None
 
-    def connect_to_meshtastic(self):
-        """Connect to Meshtastic (MQTT, serial, or API)."""
-        print("[Gateway] Connecting to Meshtastic mesh...")
-        # Example: Connect to local Meshtastic MQTT broker
-        # In production, use paho-mqtt or similar
-        pass
+    def connect_mqtt(self):
+        """Connect to Meshtastic MQTT broker (if available)."""
+        if mqtt is None:
+            print("[Gateway] paho-mqtt not installed. Using placeholder mode.")
+            return
 
-    def parse_meshtastic_message(self, raw_message):
-        """Parse incoming Meshtastic message and extract useful data."""
-        # This depends on your Meshtastic message format
-        # Common pattern: JSON or protobuf
+        self.client = mqtt.Client()
+        self.client.on_message = self.on_mqtt_message
+
         try:
-            data = json.loads(raw_message)
-            return data
-        except:
-            return None
+            self.client.connect(self.mqtt_broker, self.mqtt_port, 60)
+            # Subscribe to Meshtastic topics (adjust as needed)
+            self.client.subscribe("msh/+/json/#")
+            self.client.loop_start()
+            print(f"[Gateway] Connected to MQTT broker at {self.mqtt_broker}")
+        except Exception as e:
+            print(f"[Gateway] MQTT connection failed: {e}")
+
+    def on_mqtt_message(self, client, userdata, msg):
+        """Handle incoming Meshtastic message."""
+        try:
+            payload = msg.payload.decode()
+            data = json.loads(payload)
+            self.process_meshtastic_data(data)
+        except Exception as e:
+            print(f"[Gateway] Failed to parse message: {e}")
+
+    def process_meshtastic_data(self, data):
+        """Process and forward relevant data from Meshtastic."""
+        # Example: Extract useful fields and forward
+        print(f"[Gateway] Received from Meshtastic: {data}")
+
+        # Forward to central system (example)
+        self.forward_to_central(data)
 
     def forward_to_central(self, data):
-        """Send processed data to the central CSI system."""
+        """Send processed data to the main CSI system."""
         print(f"[Gateway] Forwarding to central system: {data}")
-        # Example: Send via UDP
-        # Or publish to an MQTT topic the main pipeline subscribes to
-        pass
+        # TODO: Send via UDP, MQTT, or HTTP to the main pipeline
 
     def run(self):
-        print("[Gateway] Starting bridge loop...")
-        self.connect_to_meshtastic()
+        print("[Gateway] Starting...")
+        self.connect_mqtt()
 
-        while True:
-            # In real code: receive message from Meshtastic
-            # message = receive_from_meshtastic()
-            # parsed = self.parse_meshtastic_message(message)
-            # if parsed:
-            #     self.forward_to_central(parsed)
-
-            time.sleep(2)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("[Gateway] Shutting down...")
 
 if __name__ == "__main__":
     gateway = MeshtasticGateway()
