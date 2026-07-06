@@ -5,13 +5,13 @@ import time
 import logging
 import threading
 
+from config import config
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
-
-from config import config
 
 try:
     from dashboard_web.app import app as web_app
@@ -34,7 +34,7 @@ except ImportError:
 
 from utils.session_logger import SessionLogger
 
-# Full imports
+# Core imports
 from aurora.adapter import AuroraAdapter
 from ingestion.ingestor import CSIIngestor
 from calibration.engine import CalibrationEngine
@@ -49,7 +49,6 @@ from autonomous_adaptation.engine import AdaptationEngine
 from federation.layer import Federation
 from agents.agent import Agent
 from dashboard.server import DashboardServer
-from simulation.generator import generate_test_frame
 from bridges.swarm_bridge import SwarmBridge
 from visualization.text_viz import render_voxel_field
 
@@ -62,18 +61,17 @@ if HAS_METRICS:
     metrics = get_metrics()
 
 def handle_gateway_data(data):
-    """Handle data coming from Meshtastic gateways."""
     msg_type = data.get("type", "unknown")
     logger.info(f"[Hybrid] Gateway message received: {msg_type}")
-    # Future: Route to EventEngine or Memory
+
 
 def run_pipeline():
     logger.info("="*70)
-    logger.info("  WiFi CSI Spatial Intelligence v1.1.0 - Hybrid Mode")
+    logger.info("  WiFi CSI Spatial Intelligence v2.0 - Real + Simulation Mode")
     logger.info("="*70)
 
     aurora = AuroraAdapter(redis_url=config.REDIS_URL)
-    ingest = CSIIngestor(udp_port=config.UDP_PORT)
+    ingest = CSIIngestor(udp_port=getattr(config, 'UDP_PORT', 4210))
     calib = CalibrationEngine()
     fusion = FusionEngine()
     tracker = TrackerEngine(max_distance=config.MAX_TRACK_DISTANCE)
@@ -106,17 +104,30 @@ def run_pipeline():
     last_heartbeat = time.time()
     last_status_log = time.time()
 
+    logger.info("Starting main ingestion loop (real UDP + fallback simulation)...")
+
+    # Main loop using proper ingestor
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
         start_time = time.time()
 
-        raw = generate_test_frame()
+        # === CORRECT DATA FLOW ===
+        raw = ingest.read_packet()          # Read from UDP (real ESP32 nodes)
+
+        if raw is None:
+            # Fallback to simulation only if no real packet arrived
+            from simulation.generator import generate_test_frame
+            raw = generate_test_frame(node_id=f"sim_{config.ROOM_NAME}")
+
         parsed = ingest.parse_packet(raw)
 
-        if parsed and parsed.get("source") == "meshtastic_gateway":
+        if parsed is None:
+            continue
+
+        if parsed.get("source") == "meshtastic_gateway":
             handle_gateway_data(parsed["data"])
             continue
 
-        # Normal WiFi CSI processing
+        # === Normal WiFi CSI Processing Pipeline ===
         calibrated = calib.calibrate(parsed)
         voxels = fusion.fuse(calibrated)
         tracks = tracker.update(voxels)
@@ -138,7 +149,8 @@ def run_pipeline():
             last_heartbeat = time.time()
 
         if time.time() - last_status_log > 15:
-            logger.info("[Integration] Healthy | Hybrid mode active")
+            mode = "REAL" if raw and raw.get("timestamp") != "simulated" else "SIM"
+            logger.info(f"[Pipeline] {mode} | Frame {frame_idx} | Tracks: {len(preds)} | Events: {len(evs)}")
             last_status_log = time.time()
 
         state = {
@@ -154,12 +166,13 @@ def run_pipeline():
             processing_time = time.time() - start_time
             metrics.record_frame(processing_time, len(preds), evs)
 
-        session_logger.log({"frame": frame_idx, "tracks": len(preds), "events": evs})
+        session_logger.log({"frame": frame_idx, "tracks": len(preds), "events": evs, "mode": mode})
 
         render_voxel_field(voxels, preds)
         time.sleep(config.DEMO_SLEEP)
 
-    logger.info("Demo complete.")
+    logger.info("Pipeline finished.")
+
 
 if __name__ == "__main__":
     run_pipeline()
