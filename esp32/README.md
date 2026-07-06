@@ -1,70 +1,82 @@
-# ESP32 CSI UDP Sender for WiFi Spatial Intelligence System
+# ESP32 CSI UDP Sender
 
-**Real hardware WiFi Channel State Information (CSI) sensing nodes** feeding the central pipeline via UDP.
+## Supported Boards
 
-## Major Improvement: WiFiManager (No Hardcoded WiFi Credentials)
+### 1. Standard ESP32 Dev Boards (Recommended for beginners)
+Use `esp32_csi_udp_sender.ino`
 
-WiFi SSID and password are **no longer hardcoded**. 
+### 2. Cheap Yellow Display (ESP32-2432S028) — 2.8" 320x240 Resistive Touch
 
-On first boot (or when credentials are missing/cleared), the ESP32 creates its own WiFi Access Point with a captive portal. You connect to it from your phone or computer and enter the real network credentials through a web interface.
+This is one of the most popular cheap ESP32 display boards.
 
-This makes deploying multiple nodes or moving them between locations much easier and more professional.
+**File to use:** `esp32_csi_cyd.ino`
 
-### How it works
-1. Flash the firmware.
-2. On first boot the device creates an AP named `ESP32-CSI-<NODE_ID>`.
-3. Connect to that AP from your phone.
-4. Open `192.168.4.1` in your browser.
-5. Enter your real WiFi SSID and password.
-6. The device saves the credentials and connects. Future boots will auto-connect.
+#### Flashing Instructions for Cheap Yellow Display (CYD)
 
-## Quick Flashing (Recommended)
+**Recommended: PlatformIO (easiest and most reliable)**
 
+1. Install PlatformIO in VS Code
+2. Open the `esp32/` folder
+3. Add this environment to your `platformio.ini`:
+
+```ini
+[env:esp32-2432S028-cyd]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+
+lib_deps =
+    bblanchon/ArduinoJson @ ^6.21.5
+    tzapu/WiFiManager @ ^2.0.17
+    bodmer/TFT_eSPI @ ^2.5.43
+    paulstoffregen/XPT2046_Touchscreen @ ^1.4
+
+build_flags =
+    -D USER_SETUP_LOADED=1
+    -D ILI9341_DRIVER=1
+    -D TFT_WIDTH=240
+    -D TFT_HEIGHT=320
+    -D TFT_MISO=12
+    -D TFT_MOSI=13
+    -D TFT_SCLK=14
+    -D TFT_CS=15
+    -D TFT_DC=2
+    -D TFT_RST=-1
+    -D TFT_BL=21
+    -D TOUCH_CS=33
+    -D SPI_FREQUENCY=40000000
+    -D SPI_READ_FREQUENCY=20000000
+```
+
+4. Build and upload:
 ```bash
-cd esp32
-chmod +x flash.sh
-./flash.sh --monitor
+pio run --target upload --environment esp32-2432S028-cyd
 ```
 
-The `flash.sh` script now also has full chip auto-detection (ESP32 / S3 / C3 / C6 / P4).
+**Alternative: Arduino IDE**
 
-## Resetting WiFi Credentials
+1. Install these libraries:
+   - `TFT_eSPI` by Bodmer
+   - `XPT2046_Touchscreen` by Paul Stoffregen
+   - `WiFiManager` + `ArduinoJson`
+2. In `TFT_eSPI/User_Setup.h`, use the settings for the **ESP32-2432S028** (many ready-made setups exist on GitHub).
+3. Upload `esp32_csi_cyd.ino`
 
-To force the config portal again:
+#### What the CYD version does
+- Uses WiFiManager for easy WiFi configuration
+- Enables real CSI collection
+- Shows live status on the 2.8" display:
+  - WiFi status + RSSI
+  - Whether it's using Real CSI or Simulation
+  - Packet counter
+  - Simple real-time CSI bar graph visualization
+- Still sends JSON CSI data over UDP to your central pipeline
 
-1. Edit `esp32_csi_udp_sender.ino`
-2. Uncomment the line:
-   ```cpp
-   // wifiManager.resetSettings();
-   ```
-3. Re-flash the device.
+This turns the Cheap Yellow Display into a nice visual CSI sensing node.
 
-Or add a button on your board that calls `wifiManager.resetSettings()` on long press (recommended for field deployments).
+## General Notes
 
-## What You Need to Configure
-
-Only these two values usually need per-node customization:
-
-```cpp
-const char* TARGET_SERVER_IP = "192.168.1.100";   // IP of the machine running the ingestor
-const char* NODE_ID          = "esp32_mining_hall_01"; // Unique identifier for this physical node
-```
-
-Everything else (WiFi, reconnection, CSI sampling, UDP transmission) is handled automatically.
-
-## Libraries Required
-
-- `ArduinoJson` (by Benoit Blanchon)
-- `WiFiManager` (by tzapu) — installed automatically via PlatformIO or Arduino Library Manager
-
-## Expected Output
-
-The node sends JSON CSI packets over UDP port 4210 that are compatible with `ingestion/ingestor.py`.
-
-## Extending to Real Hardware CSI
-
-See the large comment block at the bottom of the `.ino` file for how to enable actual CSI collection using the ESP32 WiFi stack.
-
-## Status
-
-Fully production-ready with WiFiManager, automatic port/chip detection, and realistic CSI data generation.
+- All versions support **WiFiManager** (no hardcoded credentials)
+- Real CSI is enabled by default on boards that support it well
+- Use `./flash.sh` for standard boards (auto chip + port detection)
