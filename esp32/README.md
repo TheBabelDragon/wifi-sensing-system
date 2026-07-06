@@ -60,70 +60,37 @@ See:
 
 ### Option 3: Headless / Console-only (Recommended for servers, CI, Docker, remote machines)
 
-**The easiest way is the new `flash.sh` helper script** (added in v2.0).
+**The easiest and smartest way is the `flash.sh` helper script**.
 
-#### One-command flashing with the helper script
+#### One-command flashing (with auto port detection)
 
 ```bash
 cd esp32
 chmod +x flash.sh
 
-# Basic usage (uses sensible defaults)
-./flash.sh
-
-# Specify port and/or board
-./flash.sh /dev/ttyUSB0
-./flash.sh /dev/ttyACM0 esp32:esp32:esp32s3
-./flash.sh COM3
-
-# After flashing it will ask if you want to start the serial monitor
+./flash.sh                 # Auto-detects newest serial port + uses defaults
+./flash.sh --monitor       # Auto-start serial monitor after flashing
+./flash.sh --erase         # Full chip erase first (good after partition changes)
+./flash.sh -p /dev/ttyUSB0 -b esp32:esp32:esp32s3
 ```
 
-The script automatically:
-- Checks that `arduino-cli` and `esptool.py` are installed
-- Compiles the sketch headlessly
-- Flashes using the correct three-offset method
-- Gives colored progress output and troubleshooting hints
-- Optionally starts a serial monitor afterward
+The script now features:
+- **Automatic serial port detection** (picks the most recently plugged-in device across Linux/macOS/Windows)
+- Clean command-line flags (`--port`, `--board`, `--erase`, `--monitor`, `--help`)
+- Colored progress + helpful error messages
+- Optional full chip erase
+- Post-flash guidance
 
-#### Full manual console workflow (if you prefer not to use the script)
+Run `./flash.sh --help` for full usage.
 
-**One-time setup**
+#### Manual console workflow (if you prefer)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-arduino-cli core install esp32:esp32
-pip install --upgrade esptool
-arduino-cli lib install ArduinoJson
-```
-
-**Compile + Flash (the "throughput initiation process")**
-
-```bash
-cd esp32
-
-# Compile
-arduino-cli compile --fqbn esp32:esp32:esp32dev --output-dir ./build esp32_csi_udp_sender.ino
-
-# Flash (adjust port as needed)
-esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 write_flash -z \
-  0x1000  build/esp32_csi_udp_sender.ino.bootloader.bin \
-  0x8000  build/esp32_csi_udp_sender.ino.partitions.bin \
-  0x10000 build/esp32_csi_udp_sender.ino.bin
-```
-
-**Even simpler one-command upload** (Arduino CLI calls esptool internally):
-
-```bash
-arduino-cli upload --fqbn esp32:esp32:esp32dev --port /dev/ttyUSB0 --input-dir ./build esp32_csi_udp_sender.ino
-```
-
-See the top of `flash.sh` for all configurable defaults and environment variable overrides.
+See the detailed `arduino-cli compile` + `esptool.py write_flash` commands in the previous version of this README or inside the script comments.
 
 **Notes & Troubleshooting**
-- First flash: hold BOOT button while pressing RESET (or let the tool auto-reset).
-- Permission issues on Linux: `sudo usermod -a -G dialout $USER` then log out/in.
-- The helper script `flash.sh` is the recommended way for most console users.
+- First flash: hold BOOT button while pressing RESET.
+- Linux permission: `sudo usermod -a -G dialout $USER`
+- The `flash.sh` script is now the recommended way for almost all headless/console use cases.
 
 ## Configuration
 
