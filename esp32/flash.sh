@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 #
 # flash.sh - Smart headless ESP32 CSI UDP Sender flasher
-# Auto-detects serial port, wraps arduino-cli + esptool.py with nice UX.
+# Auto-detects serial port + chip type, smart FQBN selection, nice UX.
 #
 # Usage examples:
 #   ./flash.sh
-#   ./flash.sh /dev/ttyUSB0
-#   ./flash.sh -p /dev/ttyACM0 -b esp32:esp32:esp32s3
-#   ./flash.sh --erase --monitor
-#   PORT=/dev/ttyUSB0 ./flash.sh
+#   ./flash.sh --monitor
+#   ./flash.sh -p /dev/ttyACM0 --erase
+#   ./flash.sh -b esp32:esp32:esp32s3
 #
 
 set -euo pipefail
@@ -26,30 +25,31 @@ FQBN="${FQBN:-$DEFAULT_FQBN}"
 PORT="${PORT:-$DEFAULT_PORT}"
 DO_ERASE=false
 AUTO_MONITOR=false
+DETECTED_CHIP=""
 
 # ==================== ARGUMENT PARSING ====================
 
 show_help() {
   cat <<EOF
-ESP32 CSI UDP Sender - Headless Flashing Helper
+ESP32 CSI UDP Sender - Smart Headless Flashing Helper
 
-Usage: $0 [options] [PORT] [FQBN]
+Usage: $0 [options] [PORT]
 
 Options:
-  -p, --port PORT     Serial port (e.g. /dev/ttyUSB0, COM3)
-  -b, --board FQBN    Fully Qualified Board Name (default: $DEFAULT_FQBN)
-  -e, --erase         Full chip erase before flashing (useful after partition changes)
-  -m, --monitor       Automatically start serial monitor after flashing
+  -p, --port PORT     Serial port (auto-detected if omitted)
+  -b, --board FQBN    Force specific Fully Qualified Board Name
+  -e, --erase         Full chip erase before flashing
+  -m, --monitor       Auto-start serial monitor after flashing
   -h, --help          Show this help
 
-Environment variables:
-  PORT, FQBN          Same as above (overridden by flags)
+The script auto-detects the connected ESP32 chip type (S3, C3, etc.)
+and chooses a sensible FQBN unless you override with -b.
 
 Examples:
   $0
-  $0 /dev/ttyUSB0
-  $0 -p /dev/ttyACM0 -b esp32:esp32:esp32s3 --monitor
-  $0 --erase
+  $0 --monitor
+  $0 -p /dev/ttyUSB0 --erase
+  $0 -b esp32:esp32:esp32s3
 EOF
 }
 
@@ -60,11 +60,11 @@ while [[ $# -gt 0 ]]; do
     -e|--erase)    DO_ERASE=true; shift ;;
     -m|--monitor)  AUTO_MONITOR=true; shift ;;
     -h|--help)     show_help; exit 0 ;;
-    *)             if [[ -z "$PORT" ]]; then PORT="$1"; else FQBN="$1"; fi; shift ;;
+    *)             if [[ -z "$PORT" ]]; then PORT="$1"; fi; shift ;;
   esac
 done
 
-# ==================== COLOR HELPERS ====================
+# ==================== COLOR & HELPER FUNCTIONS ====================
 
 print_header() { echo -e "\n\033[1;36m=== $1 ===\033[0m"; }
 print_success() { echo -e "\033[1;32m✓ $1\033[0m"; }
@@ -72,6 +72,20 @@ print_warning() { echo -e "\033[1;33m⚠ $1\033[0m"; }
 print_error() { echo -e "\033[1;31m✗ $1\033[0m" >&2; }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+# Map detected chip to recommended FQBN
+get_recommended_fqbn() {
+  local chip="$1"
+  case "$chip" in
+    ESP32)          echo "esp32:esp32:esp32dev" ;;
+    ESP32-S2)       echo "esp32:esp32:esp32s2" ;;
+    ESP32-S3)       echo "esp32:esp32:esp32s3" ;;
+    ESP32-C3)       echo "esp32:esp32:esp32c3" ;;
+    ESP32-C6)       echo "esp32:esp32:esp32c6" ;;
+    ESP32-P4)       echo "esp32:esp32:esp32p4" ;;   # May need arduino-esp32 >= 3.0+
+    *)              echo "$DEFAULT_FQBN" ;;
+  esac
+}
 
 # ==================== SERIAL PORT AUTO-DETECTION ====================
 
@@ -95,7 +109,6 @@ detect_serial_port() {
       ;;
   esac
 
-  # Expand globs and keep only existing files
   local existing=()
   for pattern in "${candidates[@]}"; do
     for f in $pattern; do
@@ -103,33 +116,56 @@ detect_serial_port() {
     done
   done
 
-  if [[ ${#existing[@]} -eq 0 ]]; then
-    return 1
-  fi
+  [[ ${#existing[@]} -eq 0 ]] && return 1
 
-  # Sort by modification time, newest first
   local sorted
   sorted=$(ls -t "${existing[@]}" 2>/dev/null | head -n 5)
 
   if [[ $(echo "$sorted" | wc -l) -eq 1 ]]; then
     echo "$sorted"
-    return 0
+  else
+    local chosen
+    chosen=$(echo "$sorted" | head -n1)
+    print_warning "Multiple ports found. Using newest: $chosen"
+    echo "$chosen"
   fi
-
-  # Multiple ports found — pick the newest one automatically
-  local chosen
-  chosen=$(echo "$sorted" | head -n1)
-  print_warning "Multiple serial ports detected. Using most recently connected: $chosen"
-  echo "$chosen"
   return 0
+}
+
+# ==================== CHIP TYPE DETECTION ====================
+
+detect_chip_type() {
+  local port="$1"
+  local chip_output
+
+  # Try to get chip info (works with both esptool.py and esptool)
+  if chip_output=$($ESPTool --port "$port" --baud 115200 chip_id 2>/dev/null); then
+    # Parse output like "Chip is ESP32-S3"
+    if echo "$chip_output" | grep -q "Chip is ESP32-S3"; then
+      echo "ESP32-S3"
+    elif echo "$chip_output" | grep -q "Chip is ESP32-C3"; then
+      echo "ESP32-C3"
+    elif echo "$chip_output" | grep -q "Chip is ESP32-C6"; then
+      echo "ESP32-C6"
+    elif echo "$chip_output" | grep -q "Chip is ESP32-S2"; then
+      echo "ESP32-S2"
+    elif echo "$chip_output" | grep -q "Chip is ESP32-P4"; then
+      echo "ESP32-P4"
+    elif echo "$chip_output" | grep -q "Chip is ESP32"; then
+      echo "ESP32"
+    else
+      echo "Unknown"
+    fi
+  else
+    echo "Unknown"
+  fi
 }
 
 # ==================== PRE-FLIGHT ====================
 
-print_header "ESP32 CSI UDP Sender - Smart Headless Flasher v2"
+print_header "ESP32 CSI UDP Sender - Smart Headless Flasher v3"
 
 echo "Sketch : $SKETCH"
-echo "FQBN   : $FQBN"
 echo
 
 if ! command_exists arduino-cli; then
@@ -148,33 +184,52 @@ ESPTool="esptool.py"
 command_exists esptool && ESPTool="esptool"
 
 if [[ ! -f "$SKETCH" ]]; then
-  print_error "Sketch '$SKETCH' not found. Run from the esp32/ directory."
+  print_error "Sketch not found. Run from esp32/ directory."
   exit 1
 fi
 
-# Auto-detect port if not provided
+# === PORT DETECTION ===
 if [[ -z "$PORT" ]]; then
   if detected_port=$(detect_serial_port); then
     PORT="$detected_port"
-    print_success "Auto-detected serial port: $PORT"
+    print_success "Auto-detected port: $PORT"
   else
-    print_error "No serial port detected."
-    echo "Please specify one:"
-    echo "  $0 /dev/ttyUSB0"
-    echo "  or set PORT=/dev/ttyUSB0"
+    print_error "No serial port detected. Specify with -p PORT or set PORT=..."
     exit 1
   fi
 fi
 
 echo "Port   : $PORT"
+
+# === CHIP TYPE DETECTION + SMART FQBN ===
+if [[ -z "$FQBN" || "$FQBN" == "$DEFAULT_FQBN" ]]; then
+  DETECTED_CHIP=$(detect_chip_type "$PORT")
+  if [[ "$DETECTED_CHIP" != "Unknown" && -n "$DETECTED_CHIP" ]]; then
+    local recommended
+    recommended=$(get_recommended_fqbn "$DETECTED_CHIP")
+    if [[ "$recommended" != "$DEFAULT_FQBN" ]]; then
+      FQBN="$recommended"
+      print_success "Detected chip: $DETECTED_CHIP → using FQBN: $FQBN"
+    else
+      print_warning "Detected chip: $DETECTED_CHIP (using default FQBN)"
+    fi
+  else
+    print_warning "Could not auto-detect chip type (using default FQBN: $FQBN)"
+    print_warning "You can force it with: -b esp32:esp32:esp32s3  (or similar)"
+  fi
+else
+  print_warning "Using user-specified FQBN: $FQBN (chip auto-detection skipped)"
+fi
+
+echo "FQBN   : $FQBN"
 echo "Build  : $BUILD_DIR"
 if $DO_ERASE; then echo "Mode   : Full erase + flash"; fi
 echo
 
 # Linux permission hint
 if [[ "$(uname -s)" == Linux* ]] && ! groups | grep -q dialout; then
-  print_warning "You may need to be in the 'dialout' group for serial access."
-  echo "  Run: sudo usermod -a -G dialout $USER && newgrp dialout"
+  print_warning "You may need 'dialout' group access."
+  echo "  sudo usermod -a -G dialout $USER && newgrp dialout"
 fi
 
 # ==================== COMPILE ====================
@@ -193,7 +248,7 @@ ls -lh "$BUILD_DIR"/*.bin 2>/dev/null | head -n 5 || true
 
 if $DO_ERASE; then
   print_header "Full chip erase"
-  echo "This will take ~10-30 seconds..."
+  echo "This will take a while..."
   if ! $ESPTool --chip esp32 --port "$PORT" --baud "$FLASH_BAUD" erase_flash; then
     print_error "Erase failed (continuing anyway)"
   else
@@ -224,11 +279,10 @@ if ! $ESPTool --chip esp32 \
 
   print_error "Flashing failed"
   echo ""
-  echo "Troubleshooting tips:"
-  echo "  • Put board in download mode: hold BOOT button, press RESET (or release BOOT)"
-  echo "  • Try lower baud: --baud 115200 or 460800"
-  echo "  • Check cable and permissions"
-  echo "  • Run with --erase if you changed partition scheme"
+  echo "Troubleshooting:"
+  echo "  • Hold BOOT button while pressing RESET to enter download mode"
+  echo "  • Try lower baud rate or different cable"
+  echo "  • Use --erase if you changed partition scheme"
   exit 1
 fi
 
@@ -238,11 +292,11 @@ print_success "Flashing completed successfully!"
 
 print_header "Post-flash"
 
-echo "Your ESP32 CSI node should now be running."
-echo "It will connect to WiFi and start sending JSON CSI packets to UDP port 4210."
+echo "ESP32 CSI node is now running."
+echo "It will connect to WiFi and stream JSON CSI data to UDP port 4210."
 echo
 
-echo "Useful next commands:"
+echo "Monitor with:"
 echo "  arduino-cli monitor --port $PORT --config baudrate=$MONITOR_BAUD"
 if command_exists screen; then
   echo "  screen $PORT $MONITOR_BAUD"
@@ -259,7 +313,7 @@ if $AUTO_MONITOR; then
   elif command_exists screen; then
     screen "$PORT" $MONITOR_BAUD
   else
-    print_warning "No monitor tool found. Install screen or use arduino-cli."
+    print_warning "No serial monitor tool found."
   fi
 else
   read -r -p "Start serial monitor now? [y/N] " ans
@@ -268,8 +322,6 @@ else
       arduino-cli monitor --port "$PORT" --config baudrate=$MONITOR_BAUD
     elif command_exists screen; then
       screen "$PORT" $MONITOR_BAUD
-    else
-      print_warning "Install 'screen' or arduino-cli for monitoring."
     fi
   fi
 fi
