@@ -58,95 +58,72 @@ See:
 3. `pio run --target upload --environment esp32dev`
 4. `pio device monitor` for serial
 
-### Option 3: Headless / Console-only with Arduino CLI + esptool.py (pure terminal workflow)
+### Option 3: Headless / Console-only (Recommended for servers, CI, Docker, remote machines)
 
-This is the **full "throughput initiation process"** for flashing entirely from the command line (no GUI/IDE). Perfect for servers, CI/CD, Docker, or remote/headless machines.
+**The easiest way is the new `flash.sh` helper script** (added in v2.0).
 
-#### One-time setup (run once on the machine)
+#### One-command flashing with the helper script
 
 ```bash
-# 1. Install Arduino CLI (official headless tool for .ino sketches)
+cd esp32
+chmod +x flash.sh
+
+# Basic usage (uses sensible defaults)
+./flash.sh
+
+# Specify port and/or board
+./flash.sh /dev/ttyUSB0
+./flash.sh /dev/ttyACM0 esp32:esp32:esp32s3
+./flash.sh COM3
+
+# After flashing it will ask if you want to start the serial monitor
+```
+
+The script automatically:
+- Checks that `arduino-cli` and `esptool.py` are installed
+- Compiles the sketch headlessly
+- Flashes using the correct three-offset method
+- Gives colored progress output and troubleshooting hints
+- Optionally starts a serial monitor afterward
+
+#### Full manual console workflow (if you prefer not to use the script)
+
+**One-time setup**
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-# Make sure arduino-cli is in your PATH (usually ~/bin or /usr/local/bin)
-
-# 2. Install ESP32 core (includes bootloader, partitions, toolchains)
 arduino-cli core install esp32:esp32
-
-# 3. Install esptool.py (the actual low-level flasher)
 pip install --upgrade esptool
-
-# 4. (Optional but recommended) Install ArduinoJson library once
 arduino-cli lib install ArduinoJson
 ```
 
-#### Per-project flashing workflow (run these commands)
+**Compile + Flash (the "throughput initiation process")**
 
 ```bash
-# Navigate to the folder containing esp32_csi_udp_sender.ino
-cd /path/to/your/wifi-sensing-system/esp32
+cd esp32
 
-# === STEP 1: Compile the sketch headlessly ===
-# --fqbn = Fully Qualified Board Name. Common examples:
-#   esp32:esp32:esp32dev          (generic ESP32 Dev Module)
-#   esp32:esp32:esp32s3             (ESP32-S3)
-#   esp32:esp32:esp32c3             (ESP32-C3)
-# Add any build properties if needed, e.g. for partition scheme or PSRAM
-arduino-cli compile \
-  --fqbn esp32:esp32:esp32dev \
-  --output-dir ./build \
-  esp32_csi_udp_sender.ino
+# Compile
+arduino-cli compile --fqbn esp32:esp32:esp32dev --output-dir ./build esp32_csi_udp_sender.ino
 
-# Verify build artifacts were created
-ls -la build/
-
-# Typical generated files you will use:
-#   esp32_csi_udp_sender.ino.bootloader.bin
-#   esp32_csi_udp_sender.ino.partitions.bin
-#   esp32_csi_udp_sender.ino.bin          ← the actual application firmware
-
-# === STEP 2: Flash with esptool.py (the "throughput" flashing step) ===
-# Common safe command for ESP32 Dev Module / most boards
-# -z = compress, --baud 921600 for speed (or 115200 if issues)
-# Adjust --port to your actual serial device (/dev/ttyUSB0, /dev/ttyACM0, COM3 on Windows, etc.)
-
+# Flash (adjust port as needed)
 esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 write_flash -z \
   0x1000  build/esp32_csi_udp_sender.ino.bootloader.bin \
   0x8000  build/esp32_csi_udp_sender.ino.partitions.bin \
   0x10000 build/esp32_csi_udp_sender.ino.bin
-
-# On success you should see:
-#   Hash of data verified.
-#   Leaving... Hard resetting via RTS pin...
 ```
 
-#### Even simpler one-command headless upload (Arduino CLI handles esptool internally)
+**Even simpler one-command upload** (Arduino CLI calls esptool internally):
 
 ```bash
-# After the compile step above, or combine:
-arduino-cli upload \
-  --fqbn esp32:esp32:esp32dev \
-  --port /dev/ttyUSB0 \
-  --input-dir ./build \
-  esp32_csi_udp_sender.ino
+arduino-cli upload --fqbn esp32:esp32:esp32dev --port /dev/ttyUSB0 --input-dir ./build esp32_csi_udp_sender.ino
 ```
 
-This is often the fastest "initiation process" for console users.
+See the top of `flash.sh` for all configurable defaults and environment variable overrides.
 
-#### Alternative: PlatformIO CLI (also fully headless)
-
-```bash
-cd /path/to/your/wifi-sensing-system/esp32
-pio run --target upload --environment esp32dev   # uses platformio.ini
-pio device monitor
-```
-
-**Notes & Troubleshooting for headless flashing**
-- First time flashing often needs to put the board into download mode (hold BOOT button while pressing RESET, or let esptool auto-reset via RTS/DTR).
-- If you see "Failed to connect", try different --port, lower baud rate, or add `--before default_reset` / `--after hard_reset`.
-- Windows users: use COMx ports and may need `python -m esptool` instead of `esptool.py`.
-- The three offset method (0x1000 / 0x8000 / 0x10000) is the most reliable across Arduino-ESP32 versions.
-- Some boards produce a convenient `merged.bin` — you can flash it at offset 0x0 with `esptool.py write_flash 0x0 build/...merged.bin`.
-- After flashing, the board should reboot and start sending CSI packets (watch with `arduino-cli monitor` or `pio device monitor` or `screen /dev/ttyUSB0 115200`).
+**Notes & Troubleshooting**
+- First flash: hold BOOT button while pressing RESET (or let the tool auto-reset).
+- Permission issues on Linux: `sudo usermod -a -G dialout $USER` then log out/in.
+- The helper script `flash.sh` is the recommended way for most console users.
 
 ## Configuration
 
