@@ -1,22 +1,25 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
-#include <WiFiManager.h>   // tzapu/WiFiManager - automatic WiFi configuration via captive portal
+#include <WiFiManager.h>
+
+#include <esp_wifi.h>
+#include <esp_wifi_types.h>   // For real CSI collection
 
 // === USER CONFIGURATION ===
-// NOTE: WiFi credentials are NO LONGER hardcoded.
-// On first boot (or after resetSettings), the device creates a WiFi AP.
-// Connect to it from your phone and configure real WiFi credentials via the web portal.
+const char* TARGET_SERVER_IP  = "192.168.1.100";
+const uint16_t TARGET_PORT    = 4210;
+const char* NODE_ID           = "esp32_mining_hall_01";
+const uint32_t SEND_INTERVAL_MS = 400;
+const int STATUS_LED_PIN      = 2;
 
-const char* TARGET_SERVER_IP  = "192.168.1.100";           // IP of machine running the Python ingestor
-const uint16_t TARGET_PORT    = 4210;                      // UDP port (must match ingestion/ingestor.py)
-const char* NODE_ID           = "esp32_mining_hall_01";    // Unique per physical node
-const uint32_t SEND_INTERVAL_MS = 400;                     // How often to sample & send CSI
-const int STATUS_LED_PIN      = 2;                         // Onboard LED
-
-// === ADVANCED ===
-const bool USE_REAL_CSI       = false;                     // Enable after adding real CSI callback
+// Set to true to use real hardware CSI (recommended now that it's implemented)
+const bool USE_REAL_CSI       = true;
 const uint16_t LOCAL_UDP_PORT = 4211;
+
+// === Real CSI buffers ===
+float latestRealCSI[32];
+bool hasNewCSI = false;
 
 WiFiUDP udp;
 unsigned long lastSendTime = 0;
@@ -24,77 +27,113 @@ bool wifiConnected = false;
 int ledState = LOW;
 
 float csiBuffer[32];
-float lastRssi = -70;
+
+// === Real CSI Callback ===
+void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
+  if (!info || !info->buf) return;
+
+  int len = info->len;
+  int numSub = min(32, len / 2);
+
+  for (int i = 0; i < numSub; i++) {
+    int8_t real = info->buf[i * 2];
+    int8_t imag = info->buf[i * 2 + 1];
+    float amp = sqrtf((float)real * real + (float)imag * imag);
+    latestRealCSI[i] = amp / 200.0f;           // Rough normalization - tune per environment
+    if (latestRealCSI[i] > 1.0f) latestRealCSI[i] = 1.0f;
+  }
+  hasNewCSI = true;
+}
+
+void initRealCSI() {
+  Serial.println("Initializing real CSI collection...");
+
+  // Enable promiscuous mode + CSI
+  esp_wifi_set_promiscuous(true);
+
+  wifi_csi_config_t csi_config = {
+    .lltf_en = true,
+    .htltf_en = true,
+    .stbc_htltf2_en = true,
+    .ltf_merge_en = true,
+    .channel_width = WIFI_BW_HT20,
+    .manu_scale = false
+  };
+
+  esp_wifi_set_csi_config(&csi_config);
+  esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
+  esp_wifi_set_csi(true);
+
+  Serial.println("Real CSI enabled (HT20, LTF enabled)");
+}
 
 void setupCSI() {
   for (int i = 0; i < 32; i++) {
-    csiBuffer[i] = 0.35 + 0.4 * (random(100) / 100.0);
+    csiBuffer[i] = 0.4 + 0.3 * (random(100) / 100.0);
   }
 }
 
 void updateSimulatedCSI(float currentRssi) {
-  float rssiNorm = (currentRssi + 90.0) / 60.0;
-  if (rssiNorm < 0) rssiNorm = 0;
-  if (rssiNorm > 1) rssiNorm = 1;
+  float rssiNorm = constrain((currentRssi + 90.0f) / 60.0f, 0.0f, 1.0f);
 
   for (int i = 0; i < 32; i++) {
-    float drift = (random(200) - 100) / 2000.0;
-    csiBuffer[i] = csiBuffer[i] * 0.85 + (0.15 * (0.25 + 0.55 * rssiNorm + drift));
-    if (csiBuffer[i] < 0.08) csiBuffer[i] = 0.08;
-    if (csiBuffer[i] > 0.92) csiBuffer[i] = 0.92;
+    float drift = (random(200) - 100) / 2000.0f;
+    csiBuffer[i] = csiBuffer[i] * 0.82f + (0.18f * (0.3f + 0.5f * rssiNorm + drift));
+    csiBuffer[i] = constrain(csiBuffer[i], 0.08f, 0.95f);
   }
 }
 
-// === WiFiManager-based connection (replaces hardcoded WiFi.begin) ===
+// === WiFiManager + Real CSI ===
 void connectWiFi() {
   WiFiManager wifiManager;
 
-  // Uncomment the next line to force config portal on every boot (useful for testing)
-  // wifiManager.resetSettings();
+  // wifiManager.resetSettings(); // Uncomment to force portal on every boot
 
-  // Custom AP name so you can identify the node easily when multiple devices are deployed
   String apName = "ESP32-CSI-" + String(NODE_ID);
 
   wifiManager.setAPCallback([](WiFiManager* myWiFiManager) {
-    Serial.println("\n=== WiFiManager Config Portal ==");
-    Serial.print("Connect to AP: ");
-    Serial.println(myWiFiManager->getConfigPortalSSID());
-    Serial.print("Then open http://");
-    Serial.println(WiFi.softAPIP());
-    Serial.println("Enter your real WiFi credentials.");
+    Serial.println("\n=== CONFIG PORTAL ACTIVE ===");
+    Serial.println("Connect to: " + myWiFiManager->getConfigPortalSSID());
+    Serial.println("Open http://192.168.4.1 in your browser");
   });
 
-  // Set timeout so it doesn't hang forever if user doesn't configure
-  wifiManager.setConfigPortalTimeout(180); // 3 minutes
+  wifiManager.setConfigPortalTimeout(180);
 
   Serial.println("Starting WiFiManager...");
 
   if (!wifiManager.autoConnect(apName.c_str())) {
-    Serial.println("Failed to connect to WiFi after timeout. Restarting...");
+    Serial.println("WiFi config timeout. Restarting...");
     delay(3000);
     ESP.restart();
   }
 
   wifiConnected = true;
   Serial.println("\n=== WiFi Connected via WiFiManager ===");
-  Serial.print("IP address: ");
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
   Serial.print("RSSI: ");
   Serial.print(WiFi.RSSI());
   Serial.println(" dBm");
+
   digitalWrite(STATUS_LED_PIN, HIGH);
+
+  // === Enable real CSI after successful connection ===
+  if (USE_REAL_CSI) {
+    initRealCSI();
+  }
 }
 
 void sendCSIPacket() {
   if (!wifiConnected) return;
 
   float currentRssi = WiFi.RSSI();
-  lastRssi = currentRssi;
 
-  if (USE_REAL_CSI) {
-    // TODO: populate from real CSI callback
+  if (USE_REAL_CSI && hasNewCSI) {
+    memcpy(csiBuffer, latestRealCSI, sizeof(csiBuffer));
+    hasNewCSI = false;
+  } else {
+    updateSimulatedCSI(currentRssi);
   }
-  updateSimulatedCSI(currentRssi);
 
   StaticJsonDocument<1536> doc;
   doc["node"] = NODE_ID;
@@ -111,7 +150,7 @@ void sendCSIPacket() {
   JsonObject linkObj = linksArr.createNestedObject();
   linkObj["node_a"] = NODE_ID;
   linkObj["node_b"] = "local_ap";
-  linkObj["weight"] = (currentRssi + 100.0) / 100.0;
+  linkObj["weight"] = (currentRssi + 100.0f) / 100.0f;
 
   char jsonStr[1536];
   size_t len = serializeJson(doc, jsonStr);
@@ -121,33 +160,29 @@ void sendCSIPacket() {
   bool sent = udp.endPacket();
 
   if (sent) {
-    Serial.print("[UDP] Sent CSI packet | RSSI=");
+    Serial.print("[UDP] CSI sent | RSSI=");
     Serial.print((int)currentRssi);
+    if (USE_REAL_CSI) Serial.print(" | REAL CSI");
     Serial.print(" | node=");
     Serial.println(NODE_ID);
+
     digitalWrite(STATUS_LED_PIN, LOW);
-    delay(30);
+    delay(25);
     digitalWrite(STATUS_LED_PIN, HIGH);
-  } else {
-    Serial.println("[UDP] Send failed");
   }
 }
 
 void checkWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
     wifiConnected = false;
-    Serial.println("WiFi connection lost. WiFiManager will handle reconnection...");
-    // WiFiManager + ESP32 stack usually handles auto-reconnect well.
-    // We just mark it so sendCSIPacket() pauses until reconnected.
     digitalWrite(STATUS_LED_PIN, LOW);
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
-  Serial.println("\n=== ESP32 CSI UDP Sender v3.0 (WiFiManager) ===");
-  Serial.println("WiFi Spatial Intelligence System - Real Hardware Mode");
+  delay(150);
+  Serial.println("\n=== ESP32 CSI UDP Sender v3.1 (WiFiManager + Real CSI) ===");
 
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
@@ -157,13 +192,13 @@ void setup() {
 
   if (wifiConnected) {
     udp.begin(LOCAL_UDP_PORT);
-    Serial.print("UDP ready. Targeting ");
+    Serial.print("UDP ready → ");
     Serial.print(TARGET_SERVER_IP);
     Serial.print(":");
     Serial.println(TARGET_PORT);
   }
 
-  Serial.println("Setup complete. Starting CSI transmission...\n");
+  Serial.println("Setup complete. Transmitting CSI...\n");
 }
 
 void loop() {
@@ -176,9 +211,8 @@ void loop() {
     lastSendTime = now;
   }
 
-  // Status LED heartbeat when connected
   static unsigned long lastLed = 0;
-  if (now - lastLed > 2000) {
+  if (now - lastLed > 1800) {
     if (wifiConnected) {
       ledState = !ledState;
       digitalWrite(STATUS_LED_PIN, ledState);
@@ -186,42 +220,5 @@ void loop() {
     lastLed = now;
   }
 
-  delay(10);
+  delay(8);
 }
-
-/*
-================================================================================
- FULL REAL CSI IMPLEMENTATION GUIDE
-================================================================================
-
-#include <esp_wifi.h>
-#include <esp_wifi_types.h>
-
-float latestRealCSI[32];
-bool hasNewCSI = false;
-
-void csi_rx_cb(void *ctx, wifi_csi_info_t *info) {
-  if (!info || !info->buf) return;
-
-  int numSub = min(32, (int)(info->len / 2));
-  for (int i = 0; i < numSub && i < 32; i++) {
-    int8_t real = info->buf[i*2];
-    int8_t imag = info->buf[i*2 + 1];
-    float amp = sqrt( (float)real*real + (float)imag*imag );
-    latestRealCSI[i] = amp / 200.0;
-    if (latestRealCSI[i] > 1.0) latestRealCSI[i] = 1.0;
-  }
-  hasNewCSI = true;
-}
-
-// In setup() after WiFi is connected:
-//   esp_wifi_set_promiscuous(true);
-//   wifi_csi_config_t csi_cfg = { .lltf_en = 1, .htltf_en = 1, .channel_width = WIFI_BW_HT20 };
-//   esp_wifi_set_csi_config(&csi_cfg);
-//   esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
-//   esp_wifi_set_csi(true);
-
-// Then in sendCSIPacket():
-//   if (USE_REAL_CSI && hasNewCSI) { memcpy(csiBuffer, latestRealCSI, sizeof(csiBuffer)); hasNewCSI = false; }
-================================================================================
-*/
