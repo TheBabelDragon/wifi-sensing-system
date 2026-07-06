@@ -2,6 +2,7 @@ import socket
 import json
 import logging
 import time
+import argparse
 
 logger = logging.getLogger("csi-ingestor")
 
@@ -83,3 +84,57 @@ class CSIIngestor:
             parsed = self.parse_packet(packet)
             if parsed:
                 yield parsed
+
+
+# ============================================================
+# Standalone test mode
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Standalone UDP CSI Ingestor Test Tool")
+    parser.add_argument("--port", type=int, default=4210, help="UDP port to listen on (default: 4210)")
+    parser.add_argument("--timeout", type=float, default=0.8, help="Socket timeout in seconds")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s: %(message)s"
+    )
+
+    print(f"\n=== CSI UDP Ingestor Test Mode ===")
+    print(f"Listening on UDP port {args.port}")
+    print("Waiting for packets from ESP32 nodes...\n")
+
+    ingestor = CSIIngestor(udp_port=args.port)
+
+    packet_count = 0
+
+    try:
+        while True:
+            raw = ingestor.read_packet()
+            if raw is None:
+                continue
+
+            parsed = ingestor.parse_packet(raw)
+
+            packet_count += 1
+
+            print(f"\n--- Packet #{packet_count} ---")
+            print(f"Source : {parsed.get('source', 'unknown')}")
+
+            if parsed.get("source") == "wifi_csi_node":
+                print(f"Node   : {parsed.get('node')}")
+                print(f"RSSI   : {parsed.get('rssi')} dBm")
+                csi = parsed.get("csi", [])
+                print(f"CSI    : {len(csi)} values | First 8: {csi[:8]}")
+            else:
+                print(f"Data   : {parsed.get('data')}")
+
+            print(f"Raw    : {raw}")
+
+    except KeyboardInterrupt:
+        print("\n\nStopped by user.")
+
+
+if __name__ == "__main__":
+    main()
