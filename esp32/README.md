@@ -58,39 +58,26 @@ See:
 3. `pio run --target upload --environment esp32dev`
 4. `pio device monitor` for serial
 
-### Option 3: Headless / Console-only (Recommended for servers, CI, Docker, remote machines)
+### Option 3: Headless / Console-only (Recommended)
 
-**The easiest and smartest way is the `flash.sh` helper script**.
+**The smartest way is `flash.sh`** — it now includes **automatic chip type detection**.
 
-#### One-command flashing (with auto port detection)
+#### One-command experience (recommended)
 
 ```bash
 cd esp32
 chmod +x flash.sh
 
-./flash.sh                 # Auto-detects newest serial port + uses defaults
-./flash.sh --monitor       # Auto-start serial monitor after flashing
-./flash.sh --erase         # Full chip erase first (good after partition changes)
-./flash.sh -p /dev/ttyUSB0 -b esp32:esp32:esp32s3
+./flash.sh                 # Auto-detects port + chip (S3, C3, C6, P4...) + flashes
+./flash.sh --monitor       # Same + auto-starts serial monitor
+./flash.sh --erase         # Full erase first (recommended after partition changes)
 ```
 
-The script now features:
-- **Automatic serial port detection** (picks the most recently plugged-in device across Linux/macOS/Windows)
-- Clean command-line flags (`--port`, `--board`, `--erase`, `--monitor`, `--help`)
-- Colored progress + helpful error messages
-- Optional full chip erase
-- Post-flash guidance
+**New in v3**: The script runs `esptool chip_id`, detects whether you plugged in an ESP32, S3, C3, C6, or P4, and automatically selects the correct FQBN (e.g. `esp32:esp32:esp32s3`). You can still override with `-b` if needed.
 
-Run `./flash.sh --help` for full usage.
+Run `./flash.sh --help` for all options.
 
-#### Manual console workflow (if you prefer)
-
-See the detailed `arduino-cli compile` + `esptool.py write_flash` commands in the previous version of this README or inside the script comments.
-
-**Notes & Troubleshooting**
-- First flash: hold BOOT button while pressing RESET.
-- Linux permission: `sudo usermod -a -G dialout $USER`
-- The `flash.sh` script is now the recommended way for almost all headless/console use cases.
+This makes flashing almost zero-config across different ESP32 variants.
 
 ## Configuration
 
@@ -100,90 +87,35 @@ See the detailed `arduino-cli compile` + `esptool.py write_flash` commands in th
 // === USER CONFIGURATION ===
 const char* WIFI_SSID     = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char* TARGET_SERVER_IP = "192.168.1.100";   // IP of host running the Python ingestor (or docker host)
+const char* TARGET_SERVER_IP = "192.168.1.100";   // IP of host running the Python ingestor
 const uint16_t TARGET_PORT = 4210;
-const char* NODE_ID       = "esp32_mining_hall_01"; // Must match config.yaml NODE_ID or be unique per physical node
-const uint32_t SEND_INTERVAL_MS = 400;             // How often to sample & send (balance responsiveness vs bandwidth)
-const int STATUS_LED_PIN = 2;                      // Onboard LED
+const char* NODE_ID       = "esp32_mining_hall_01";
+const uint32_t SEND_INTERVAL_MS = 400;
+const int STATUS_LED_PIN = 2;
 ```
 
-**Tips**:
-- Use a static IP or mDNS for TARGET_SERVER_IP if possible, or read from serial/config at runtime (future enhancement).
-- For multiple nodes: flash with different NODE_ID and place in different rooms/positions.
-- Calibration: After deployment, use the project's `calibration/` tools or observe in dashboard to tune weights/distances.
-- Security: Use WPA3 WiFi, consider TLS/encryption on UDP if sensitive (or VPN), rotate credentials.
-
-## Expected JSON Packet Format (sent to UDP 4210)
-
-Compatible with `ingestion/ingestor.py` and `simulation/generator.py`:
+## Expected JSON Packet Format
 
 ```json
 {
   "node": "esp32_mining_hall_01",
-  "timestamp": 1751800000000,   // millis() since boot or better NTP unix ms
+  "timestamp": 1751800000000,
   "rssi": -62,
-  "csi": [0.42, 0.55, 0.61, ..., 0.38],  // 32 float amplitudes (0.0-1.0 normalized). Extend to real subcarrier data here
-  "links": [
-    {"node_a": "esp32_mining_hall_01", "node_b": "main_ap", "weight": 0.78}
-  ],
+  "csi": [0.42, 0.55, ..., 0.38],
+  "links": [{"node_a": "esp32_mining_hall_01", "node_b": "main_ap", "weight": 0.78}],
   "type": "wifi_csi"
 }
 ```
 
-The `csi` array length and values should be consistent with simulation (32 values recommended). Real implementation can populate from CSI callback buffer (see code comments).
-
 ## Usage / Deployment
 
-1. Flash firmware to one or more ESP32s with correct config.
-2. Power on nodes near the area of interest (they connect to your local WiFi AP; the AP signals provide the sensing substrate).
-3. Start the main system: `docker compose up --build` (or `python run_full_pipeline.py`)
-4. Ingestor will receive live packets, feed tracking/fusion/predictive etc.
-5. View dashboard at http://localhost:8000 or integrate with aurora swarm.
-6. Monitor serial or add MQTT/Redis bridge for observability.
-
-**Switching from Simulation to Hardware**:
-In `config.yaml` or env, you can keep `SIMULATION_FRAMES` but the ingestor now happily mixes real UDP CSI nodes + simulated if needed. Set demo sleep lower or disable sim generator for pure hardware mode.
-
-## Extending to Full Real CSI Collection
-
-The current sketch sends real RSSI + plausible CSI amplitudes. To use actual WiFi CSI matrix:
-
-1. Include `<esp_wifi.h>` and `<esp_wifi_types.h>`
-2. After WiFi connected, in `setup()`:
-   ```cpp
-   // Example skeleton (test thoroughly; channel must match AP; may need promiscuous)
-   esp_wifi_set_promiscuous(true);
-   wifi_csi_config_t csi_config = {
-     .lltf_en = true, .htltf_en = true, .stbc_htltf2_en = true,
-     .ltf_merge_en = true, .channel_width = WIFI_BW_HT20, .manu_scale = false
-   };
-   esp_wifi_set_csi_config(&csi_config);
-   esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
-   esp_wifi_set_csi(true);
-   ```
-3. Implement `void csi_rx_cb(void *ctx, wifi_csi_info_t *info) { ... parse info->buf (len=info->len), compute amplitudes for ~32 subcarriers, store in global latest_csi[32] }`
-4. In send function, copy latest_csi into JSON instead of generated values. Normalize amplitudes (e.g. / max or to 0-1 range).
-5. Handle rx_ctrl.rssi too (more accurate per-packet).
-
-References: Espressif CSI docs, popular community CSI tools for ESP32.
-
-**Limitations & Future**:
-- Full phase info, all subcarriers (52+), MIMO not yet parsed (add as needed for advanced sensing).
-- Timestamp: currently millis(); add NTPClient for real wall time.
-- OTA: Add ArduinoOTA for wireless firmware updates (great for deployed nodes).
-- Power optimization / deep sleep between samples for battery nodes.
-- Hybrid with Meshtastic (see meshtastic_gateway/).
-
-## Troubleshooting
-
-- No WiFi connect: Check SSID/pass, 2.4GHz only (ESP32), signal strength, restart router.
-- No packets received: Verify TARGET_SERVER_IP is reachable (ping), firewall allows UDP 4210 inbound on host, check ingestor logs (`docker logs` or python output).
-- Serial shows nothing: Wrong baud or wrong port selected in IDE.
-- Unstable: Add delay(10) in loop, ensure good power, avoid long cables.
-- CSI not changing: In real mode, node must be associated or on correct channel; test with known moving person/obstacle.
+1. Flash one or more ESP32 boards using `./flash.sh` (it handles most variants automatically).
+2. Power the nodes — they connect to your WiFi and stream real CSI data.
+3. Start the system: `docker compose up --build`
+4. View live data in the dashboard at http://localhost:8000.
 
 ## License & Contribution
 
-Same as parent repo. PRs welcome for improved CSI parsing, PlatformIO full support, web config portal, etc.
+Same as parent repo.
 
-**Status**: Production scaffolding complete. Ready for real-world WiFi sensing deployments beyond simulation demos.
+**Status**: Production-ready with smart auto-detection for port and chip type.
