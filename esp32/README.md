@@ -32,7 +32,6 @@ See:
   - ESP32-P4 (see sibling `esp32-p4-dsi-lcd/` for display variant)
 - Stable 3.3V/5V power (WiFi peaks ~300-500mA; use good PSU or LiPo with regulator)
 - Optional: External antenna for better range/sensitivity in sensing applications
-- Status LED on GPIO 2 (common on Dev boards)
 
 **Note on CSI**: Full per-subcarrier CSI requires ESP32 in appropriate mode (connected to AP or promiscuous + channel fixed). The base firmware provides real RSSI + transport; full CSI matrix parsing is stubbed with comments for extension (see code). For production CSI sensing, consider ESP-IDF native or proven libs like those in Espressif CSI examples.
 
@@ -55,29 +54,99 @@ See:
 ### Option 2: PlatformIO (recommended for serious use / CI)
 
 1. Install [PlatformIO IDE](https://platformio.org/) (VSCode extension) or CLI
-2. In this `esp32/` dir (or parent), create `platformio.ini` (example below)
+2. In this `esp32/` dir (or parent), create/use `platformio.ini` (example already provided in this folder)
 3. `pio run --target upload --environment esp32dev`
 4. `pio device monitor` for serial
 
-Example `platformio.ini` (place in `esp32/`):
-```ini
-[env:esp32dev]
-platform = espressif32
-board = esp32dev
-framework = arduino
-monitor_speed = 115200
-lib_deps =
-    bblanchon/ArduinoJson@^6.21.5
-build_flags =
-    -DCORE_DEBUG_LEVEL=3
-```
+### Option 3: Headless / Console-only with Arduino CLI + esptool.py (pure terminal workflow)
 
-### Option 3: esptool.py (advanced / headless)
+This is the **full "throughput initiation process"** for flashing entirely from the command line (no GUI/IDE). Perfect for servers, CI/CD, Docker, or remote/headless machines.
+
+#### One-time setup (run once on the machine)
 
 ```bash
-esptool.py --chip esp32 --port /dev/ttyUSB0 write_flash -z 0x1000 bootloader.bin 0x8000 partition-table.bin 0x10000 esp32_csi_udp_sender.bin
+# 1. Install Arduino CLI (official headless tool for .ino sketches)
+curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+# Make sure arduino-cli is in your PATH (usually ~/bin or /usr/local/bin)
+
+# 2. Install ESP32 core (includes bootloader, partitions, toolchains)
+arduino-cli core install esp32:esp32
+
+# 3. Install esptool.py (the actual low-level flasher)
+pip install --upgrade esptool
+
+# 4. (Optional but recommended) Install ArduinoJson library once
+arduino-cli lib install ArduinoJson
 ```
-(Generate .bin via Arduino export or PlatformIO)
+
+#### Per-project flashing workflow (run these commands)
+
+```bash
+# Navigate to the folder containing esp32_csi_udp_sender.ino
+cd /path/to/your/wifi-sensing-system/esp32
+
+# === STEP 1: Compile the sketch headlessly ===
+# --fqbn = Fully Qualified Board Name. Common examples:
+#   esp32:esp32:esp32dev          (generic ESP32 Dev Module)
+#   esp32:esp32:esp32s3             (ESP32-S3)
+#   esp32:esp32:esp32c3             (ESP32-C3)
+# Add any build properties if needed, e.g. for partition scheme or PSRAM
+arduino-cli compile \
+  --fqbn esp32:esp32:esp32dev \
+  --output-dir ./build \
+  esp32_csi_udp_sender.ino
+
+# Verify build artifacts were created
+ls -la build/
+
+# Typical generated files you will use:
+#   esp32_csi_udp_sender.ino.bootloader.bin
+#   esp32_csi_udp_sender.ino.partitions.bin
+#   esp32_csi_udp_sender.ino.bin          ← the actual application firmware
+
+# === STEP 2: Flash with esptool.py (the "throughput" flashing step) ===
+# Common safe command for ESP32 Dev Module / most boards
+# -z = compress, --baud 921600 for speed (or 115200 if issues)
+# Adjust --port to your actual serial device (/dev/ttyUSB0, /dev/ttyACM0, COM3 on Windows, etc.)
+
+esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 write_flash -z \
+  0x1000  build/esp32_csi_udp_sender.ino.bootloader.bin \
+  0x8000  build/esp32_csi_udp_sender.ino.partitions.bin \
+  0x10000 build/esp32_csi_udp_sender.ino.bin
+
+# On success you should see:
+#   Hash of data verified.
+#   Leaving... Hard resetting via RTS pin...
+```
+
+#### Even simpler one-command headless upload (Arduino CLI handles esptool internally)
+
+```bash
+# After the compile step above, or combine:
+arduino-cli upload \
+  --fqbn esp32:esp32:esp32dev \
+  --port /dev/ttyUSB0 \
+  --input-dir ./build \
+  esp32_csi_udp_sender.ino
+```
+
+This is often the fastest "initiation process" for console users.
+
+#### Alternative: PlatformIO CLI (also fully headless)
+
+```bash
+cd /path/to/your/wifi-sensing-system/esp32
+pio run --target upload --environment esp32dev   # uses platformio.ini
+pio device monitor
+```
+
+**Notes & Troubleshooting for headless flashing**
+- First time flashing often needs to put the board into download mode (hold BOOT button while pressing RESET, or let esptool auto-reset via RTS/DTR).
+- If you see "Failed to connect", try different --port, lower baud rate, or add `--before default_reset` / `--after hard_reset`.
+- Windows users: use COMx ports and may need `python -m esptool` instead of `esptool.py`.
+- The three offset method (0x1000 / 0x8000 / 0x10000) is the most reliable across Arduino-ESP32 versions.
+- Some boards produce a convenient `merged.bin` — you can flash it at offset 0x0 with `esptool.py write_flash 0x0 build/...merged.bin`.
+- After flashing, the board should reboot and start sending CSI packets (watch with `arduino-cli monitor` or `pio device monitor` or `screen /dev/ttyUSB0 115200`).
 
 ## Configuration
 
