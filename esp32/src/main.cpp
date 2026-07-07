@@ -41,10 +41,12 @@ unsigned long lastSendTime = 0;
 bool wifiConnected = false;
 int packetCount = 0;
 
-// === Enhanced CSI Metrics for Obstruction Bodies ===
+// === Enhanced CSI Metrics ===
 float csiVariance = 0;
 float activityLevel = 0;
 bool bodyDetected = false;
+int bodyCount = 0;
+float bodyPositions[3] = {0}; // relative horizontal positions
 
 void updateCSIMetrics() {
   float mean = 0;
@@ -58,8 +60,19 @@ void updateCSIMetrics() {
   }
   csiVariance = variance / 32.0f;
 
-  activityLevel = constrain(csiVariance * 8.0f, 0.0f, 1.0f);
-  bodyDetected = (activityLevel > 0.28f);
+  activityLevel = constrain(csiVariance * 7.5f, 0.0f, 1.0f);
+  bodyDetected = (activityLevel > 0.25f);
+
+  // Estimate number of bodies and positions (simple clustering)
+  bodyCount = 0;
+  if (activityLevel > 0.25f) bodyCount++;
+  if (activityLevel > 0.55f) bodyCount++;
+  if (activityLevel > 0.80f) bodyCount++;
+
+  // Fake some horizontal spread for multiple bodies
+  bodyPositions[0] = (activityLevel - 0.5f) * 60;
+  bodyPositions[1] = (activityLevel - 0.3f) * 90;
+  bodyPositions[2] = (activityLevel - 0.7f) * 50;
 }
 
 // === Real CSI Callback ===
@@ -96,50 +109,76 @@ void initRealCSI() {
   Serial.println("[CSI] Real CSI collection enabled");
 }
 
-// === First-Person Perspective Visualization for CYD ===
+// === Sick First-Person Perspective View ===
 #if HAS_DISPLAY
 
 void drawFirstPersonView() {
   tft.fillScreen(TFT_BLACK);
 
-  // Horizon line
-  tft.drawFastHLine(0, 120, 320, TFT_DARKGREY);
+  // Horizon + sky gradient feel
+  tft.fillRect(0, 0, 320, 120, TFT_NAVY);
+  tft.drawFastHLine(0, 120, 320, TFT_WHITE);
 
-  // Simple perspective floor grid
-  for (int y = 120; y < 240; y += 20) {
-    int width = map(y, 120, 240, 60, 300);
-    tft.drawFastHLine(160 - width/2, y, width, TFT_DARKGREY);
+  // Perspective floor grid (stronger depth)
+  for (int i = 0; i < 7; i++) {
+    int y = 120 + i * 18;
+    int w = 40 + i * 38;
+    tft.drawFastHLine(160 - w/2, y, w, TFT_DARKGREY);
   }
 
-  // Draw "bodies" / obstructions in first-person view
-  if (bodyDetected && activityLevel > 0.2f) {
-    // Calculate apparent size and horizontal position based on activity
-    int bodyWidth = map(activityLevel * 100, 0, 100, 20, 80);
-    int bodyHeight = map(activityLevel * 100, 0, 100, 30, 120);
-    int xPos = 160 + (int)((activityLevel - 0.5f) * 80);  // Slight horizontal shift
+  // Draw obstruction bodies in first-person view
+  for (int b = 0; b < min(3, bodyCount); b++) {
+    if (activityLevel < 0.2f) break;
 
-    // Draw body as a simple rectangle (like a person/obstacle)
-    tft.fillRect(xPos - bodyWidth/2, 120 - bodyHeight, bodyWidth, bodyHeight, TFT_CYAN);
-    tft.drawRect(xPos - bodyWidth/2, 120 - bodyHeight, bodyWidth, bodyHeight, TFT_WHITE);
+    float strength = activityLevel - (b * 0.15f);
+    if (strength < 0.15f) continue;
 
-    // Label
+    int bodyWidth  = map(strength * 100, 0, 100, 18, 70);
+    int bodyHeight = map(strength * 100, 0, 100, 35, 110);
+
+    int xOffset = bodyPositions[b];
+    int xPos = 160 + xOffset;
+    int yBottom = 118;
+    int yTop = yBottom - bodyHeight;
+
+    // Body (cyan with white outline)
+    tft.fillRect(xPos - bodyWidth/2, yTop, bodyWidth, bodyHeight, TFT_CYAN);
+    tft.drawRect(xPos - bodyWidth/2, yTop, bodyWidth, bodyHeight, TFT_WHITE);
+
+    // Simple head
+    int headSize = bodyWidth / 2;
+    tft.fillCircle(xPos, yTop - headSize/2, headSize, TFT_CYAN);
+    tft.drawCircle(xPos, yTop - headSize/2, headSize, TFT_WHITE);
+
+    // Distance label
     tft.setTextColor(TFT_WHITE);
     tft.setTextSize(1);
-    tft.setCursor(xPos - 20, 125);
-    tft.print("BODY");
+    tft.setCursor(xPos - 12, yBottom + 4);
+    tft.printf("%.1fm", 1.5f + b * 0.8f);
   }
 
-  // Status bar at top
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  // Top status bar
+  tft.fillRect(0, 0, 320, 22, TFT_BLACK);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(5, 5);
-  tft.printf("Node: %s  RSSI:%d  Act:%.2f", NODE_ID, (int)WiFi.RSSI(), activityLevel);
+  tft.setCursor(6, 6);
+  tft.printf("%s  RSSI:%d  Act:%.2f  Bodies:%d", NODE_ID, (int)WiFi.RSSI(), activityLevel, bodyCount);
 
+  // Bottom info
   if (bodyDetected) {
     tft.setTextColor(TFT_RED);
-    tft.setCursor(5, 18);
+    tft.setCursor(6, 225);
     tft.print("OBSTRUCTION DETECTED");
+  } else {
+    tft.setTextColor(TFT_GREEN);
+    tft.setCursor(6, 225);
+    tft.print("CLEAR");
   }
+
+  // Small activity bar on the right
+  int barHeight = activityLevel * 80;
+  tft.fillRect(305, 140, 10, 80, TFT_DARKGREY);
+  tft.fillRect(305, 220 - barHeight, 10, barHeight, TFT_CYAN);
 }
 
 void initDisplay() {
@@ -186,7 +225,6 @@ void sendCSIPacket() {
   float rssi = WiFi.RSSI();
 
   if (USE_REAL_CSI && hasNewCSI) {
-    // Real CSI already processed
   } else {
     for (int i = 0; i < 32; i++) latestRealCSI[i] = 0.4f + (random(50) / 100.0f);
     updateCSIMetrics();
@@ -199,6 +237,7 @@ void sendCSIPacket() {
   doc["type"] = "wifi_csi";
   doc["activity"] = activityLevel;
   doc["body_detected"] = bodyDetected;
+  doc["body_count"] = bodyCount;
 
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
@@ -217,7 +256,7 @@ void sendCSIPacket() {
     updateDisplay(rssi);
   #endif
 
-  Serial.printf("[UDP] Sent | RSSI=%d | Activity=%.2f | Body=%d\n", (int)rssi, activityLevel, bodyDetected);
+  Serial.printf("[UDP] Sent | RSSI=%d | Act=%.2f | Bodies=%d\n", (int)rssi, activityLevel, bodyCount);
 }
 
 void setup() {
@@ -235,7 +274,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node Ready (First-Person View) ===");
+  Serial.println("=== ESP32 CSI Node Ready (Sick First-Person View) ===");
 }
 
 void loop() {
