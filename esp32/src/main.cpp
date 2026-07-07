@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
@@ -9,9 +11,8 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// Goal: Intuitive spatial heatmap of person-occupied areas
-// Inspired by real WiFi CSI motion visualization techniques
-// Focus: Motion detection + spatial coherence, not raw subcarriers
+// ESP-NOW + CSI Heat Map Node (WifiMatrixVisionMaxxingMode)
+// Can operate with or without full WiFi connection
 // ============================================================
 
 #if HAS_DISPLAY
@@ -29,11 +30,14 @@
 // === CONFIG ===
 const char* TARGET_SERVER_IP  = "192.168.1.100";
 const uint16_t TARGET_PORT    = 4210;
-const char* NODE_ID           = "esp32_node_01";
+const char* NODE_ID           = "esp32_cyd_01";
 const uint32_t SEND_INTERVAL_MS = 400;
 const int STATUS_LED_PIN      = 2;
 
 const bool USE_REAL_CSI = true;
+const bool USE_ESP_NOW    = true;     // Enable ESP-NOW transport
+
+const uint8_t BROADCAST_ADDRESS[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 float latestRealCSI[32];
 bool hasNewCSI = false;
@@ -53,7 +57,57 @@ unsigned long lastSendTime = 0;
 bool wifiConnected = false;
 int packetCount = 0;
 
-// === Motion-Focused Heat Map (Inspired by real CSI visualization) ===
+// === ESP-NOW Send Callback ===
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  // Optional: handle send status
+}
+
+// === ESP-NOW Receive Callback (for future commands) ===
+void onDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+  // Placeholder for receiving commands from gateway
+}
+
+// === Initialize ESP-NOW ===
+void initESPNow() {
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataRecv);
+
+  // Add broadcast peer
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, BROADCAST_ADDRESS, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add ESP-NOW broadcast peer");
+  }
+
+  Serial.println("[ESP-NOW] Initialized");
+}
+
+// === Send summarized data over ESP-NOW ===
+void sendViaESPNow() {
+  if (!USE_ESP_NOW) return;
+
+  // Create compact payload (well under 250 bytes)
+  StaticJsonDocument<256> doc;
+  doc["node"] = NODE_ID;
+  doc["rssi"] = (int)WiFi.RSSI();
+  doc["activity"] = activityLevel;
+  doc["hot_zones"] = hotZoneCount;
+  doc["obstruction"] = significantObstruction;
+
+  char buffer[256];
+  size_t len = serializeJson(doc, buffer);
+
+  esp_now_send(BROADCAST_ADDRESS, (uint8_t*)buffer, len);
+}
+
+// === CSI Processing ===
 void updateCSIMetrics() {
   float mean = 0;
   for (int i = 0; i < 32; i++) mean += latestRealCSI[i];
@@ -66,7 +120,7 @@ void updateCSIMetrics() {
   }
   csiVariance = variance / 32.0f;
 
-  activityLevel = constrain(csiVariance * 7.2f, 0.0f, 1.0f);
+  activityLevel = constrain(csiVariance * 7.0f, 0.0f, 1.0f);
 
   hotZoneCount = 0;
 
@@ -76,16 +130,14 @@ void updateCSIMetrics() {
     float current = latestRealCSI[csiIdx];
     float previous = prevCSI[csiIdx];
 
-    // Strong emphasis on temporal change (real movement)
     float motion = fabs(current - previous);
-
-    // Base excitation from motion + some amplitude when activity is high
     float excitation = motion * 4.0f;
+
     if (activityLevel > 0.35f) {
       excitation += current * 0.5f;
     }
 
-    // Light spatial smoothing (helps create blob-like hotspots)
+    // Light spatial smoothing
     float neighborAvg = 0;
     int count = 0;
     if (i > 0) { neighborAvg += heatMap[i-1]; count++; }
@@ -93,20 +145,15 @@ void updateCSIMetrics() {
     if (i >= GRID_W) { neighborAvg += heatMap[i-GRID_W]; count++; }
     if (i < (GRID_H-1)*GRID_W) { neighborAvg += heatMap[i+GRID_W]; count++; }
 
-    if (count > 0) {
-      excitation += (neighborAvg / count) * 0.08f;
-    }
+    if (count > 0) excitation += (neighborAvg / count) * 0.08f;
 
-    // Decay + update
     heatMap[i] = heatMap[i] * 0.80f + excitation * 0.20f;
     heatMap[i] = constrain(heatMap[i], 0.0f, 2.2f);
 
     if (heatMap[i] > 1.08f) hotZoneCount++;
   }
 
-  for (int i = 0; i < 32; i++) {
-    prevCSI[i] = latestRealCSI[i];
-  }
+  for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 
   significantObstruction = (hotZoneCount >= 4) || (activityLevel > 0.50f);
 }
@@ -147,7 +194,7 @@ void initRealCSI() {
   Serial.println("[CSI] Real CSI collection enabled");
 }
 
-// === Heat Map Display ===
+// === Display ===
 #if HAS_DISPLAY
 
 uint16_t heatColor(float v) {
@@ -177,12 +224,12 @@ void drawHeatMap() {
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(1);
   tft.setCursor(5, 5);
-  tft.printf("%s  RSSI:%d  Heat:%.2f  HotZones:%d", NODE_ID, (int)WiFi.RSSI(), activityLevel, hotZoneCount);
+  tft.printf("%s  RSSI:%d  Heat:%.2f  Hot:%d", NODE_ID, (int)WiFi.RSSI(), activityLevel, hotZoneCount);
 
   if (significantObstruction) {
     tft.setTextColor(TFT_RED);
     tft.setCursor(5, 225);
-    tft.print("OBSTRUCTION DETECTED");
+    tft.print("OBSTRUCTION");
   } else {
     tft.setTextColor(TFT_GREEN);
     tft.setCursor(5, 225);
@@ -208,67 +255,51 @@ void updateDisplay(float rssi) {
 
 #endif
 
-// === WiFiManager ===
-void connectWiFi() {
+// === WiFi + ESP-NOW Setup ===
+void setupWiFi() {
+  WiFi.mode(WIFI_AP_STA);   // Needed for ESP-NOW + optional WiFi
+
+  if (USE_ESP_NOW) {
+    initESPNow();
+  }
+
+  // Optional: Try to connect to main WiFi (non-blocking for display)
   WiFiManager wifiManager;
-  String apName = String("ESP32-CSI-") + NODE_ID;
+  wifiManager.setConfigPortalTimeout(30); // Don't block forever
 
-  if (!wifiManager.autoConnect(apName.c_str())) {
-    Serial.println("Failed to connect. Restarting...");
-    delay(3000);
-    ESP.restart();
+  if (wifiManager.autoConnect("ESP32-CSI-Setup")) {
+    wifiConnected = true;
+    Serial.println("WiFi connected (optional)");
+  } else {
+    Serial.println("Running in ESP-NOW only mode (no main WiFi)");
   }
-
-  wifiConnected = true;
-  Serial.println("WiFi connected via WiFiManager");
-
-  if (USE_REAL_CSI) {
-    initRealCSI();
-  }
-
-  #if HAS_DISPLAY
-    updateDisplay(WiFi.RSSI());
-  #endif
 }
 
-void sendCSIPacket() {
-  if (!wifiConnected) return;
-
-  float rssi = WiFi.RSSI();
-
-  if (USE_REAL_CSI && hasNewCSI) {
-  } else {
-    for (int i = 0; i < 32; i++) latestRealCSI[i] = 0.4f + (random(50) / 100.0f);
-    updateCSIMetrics();
+void sendData() {
+  if (USE_ESP_NOW) {
+    sendViaESPNow();
   }
 
-  StaticJsonDocument<1024> doc;
-  doc["node"] = NODE_ID;
-  doc["timestamp"] = millis();
-  doc["rssi"] = (int)rssi;
-  doc["type"] = "wifi_csi";
-  doc["activity"] = activityLevel;
-  doc["significant_obstruction"] = significantObstruction;
-  doc["hot_zones"] = hotZoneCount;
+  if (wifiConnected) {
+    // Optional UDP fallback
+    StaticJsonDocument<512> doc;
+    doc["node"] = NODE_ID;
+    doc["timestamp"] = millis();
+    doc["rssi"] = (int)WiFi.RSSI();
+    doc["activity"] = activityLevel;
+    doc["hot_zones"] = hotZoneCount;
+    doc["obstruction"] = significantObstruction;
 
-  JsonArray csiArr = doc.createNestedArray("csi");
-  for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
+    JsonArray csiArr = doc.createNestedArray("csi");
+    for (int i = 0; i < 8; i++) csiArr.add(latestRealCSI[i]); // Send subset
 
-  char jsonBuffer[1024];
-  serializeJson(doc, jsonBuffer);
+    char buffer[512];
+    serializeJson(doc, buffer);
 
-  udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
-  udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
-  udp.endPacket();
-
-  packetCount++;
-  hasNewCSI = false;
-
-  #if HAS_DISPLAY
-    updateDisplay(rssi);
-  #endif
-
-  Serial.printf("[UDP] Sent | RSSI=%d | Heat=%.2f | HotZones=%d\n", (int)rssi, activityLevel, hotZoneCount);
+    udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
+    udp.write((uint8_t*)buffer, strlen(buffer));
+    udp.endPacket();
+  }
 }
 
 void setup() {
@@ -282,20 +313,28 @@ void setup() {
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
 
-  connectWiFi();
+  setupWiFi();
+
+  if (USE_REAL_CSI) {
+    initRealCSI();
+  }
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Heat Map (Motion-Focused) ===");
+  Serial.println("=== ESP32 CSI + ESP-NOW Heat Map Node Ready ===");
 }
 
 void loop() {
   unsigned long now = millis();
 
   if (now - lastSendTime >= SEND_INTERVAL_MS) {
-    sendCSIPacket();
+    sendData();
     lastSendTime = now;
   }
+
+  #if HAS_DISPLAY
+    updateDisplay(WiFi.RSSI());
+  #endif
 
   delay(10);
 }
