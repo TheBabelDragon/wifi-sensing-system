@@ -3,13 +3,13 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
+#include <cmath>                    // for sqrtf
 
 #include <esp_wifi.h>
 #include <esp_wifi_types.h>
 
 // ============================================================
 // BOARD TYPE - Controlled by build flag HAS_DISPLAY
-// Set via platformio.ini build_flags
 // ============================================================
 
 #if HAS_DISPLAY
@@ -32,7 +32,6 @@ const int STATUS_LED_PIN      = 2;
 
 const bool USE_REAL_CSI = true;
 
-// CSI buffers
 float latestRealCSI[32];
 bool hasNewCSI = false;
 
@@ -59,12 +58,13 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
 void initRealCSI() {
   esp_wifi_set_promiscuous(true);
 
+  // Note: .channel_width was removed because it does not exist
+  // in the current arduino-esp32 wifi_csi_config_t struct
   wifi_csi_config_t csi_config = {
     .lltf_en = true,
     .htltf_en = true,
     .stbc_htltf2_en = true,
     .ltf_merge_en = true,
-    .channel_width = WIFI_BW_HT20,
     .manu_scale = false
   };
 
@@ -111,7 +111,6 @@ void updateDisplay(float rssi) {
   tft.setTextColor(hasNewCSI && USE_REAL_CSI ? TFT_CYAN : TFT_YELLOW);
   tft.print(USE_REAL_CSI ? "REAL" : "SIM");
 
-  // Simple bar graph
   tft.fillRect(10, 160, 300, 50, TFT_BLACK);
   for (int i = 0; i < 32; i++) {
     int h = latestRealCSI[i] * 45;
@@ -124,10 +123,6 @@ void updateDisplay(float rssi) {
 void connectWiFi() {
   WiFiManager wifiManager;
   String apName = String("ESP32-CSI-") + NODE_ID;
-
-  wifiManager.setAPCallback([](WiFiManager* myWiFiManager) {
-    Serial.println("Config portal active");
-  });
 
   if (!wifiManager.autoConnect(apName.c_str())) {
     Serial.println("Failed to connect. Restarting...");
@@ -153,7 +148,7 @@ void sendCSIPacket() {
   float rssi = WiFi.RSSI();
 
   if (USE_REAL_CSI && hasNewCSI) {
-    // Real CSI data is already in latestRealCSI[]
+    // Real data already in latestRealCSI[]
   } else {
     for (int i = 0; i < 32; i++) {
       latestRealCSI[i] = 0.4f + (random(50) / 100.0f);
@@ -204,7 +199,7 @@ void setup() {
   udp.begin(4211);
 
   Serial.println("=== ESP32 CSI Node Ready ===");
-  Serial.printf("Display: %s\n", HAS_DISPLAY ? "ENABLED (CYD)" : "DISABLED (Standard ESP32)");
+  Serial.printf("Display: %s\n", HAS_DISPLAY ? "ENABLED (CYD)" : "DISABLED");
 }
 
 void loop() {
