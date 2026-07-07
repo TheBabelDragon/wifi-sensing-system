@@ -9,8 +9,9 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// WifiMatrixVisionMaxxingMode = always-on
-// Goal: Intuitive heat map of person-occupied areas in the room
+// Goal: Intuitive "heartbeat detector" style visualization
+// Hotspots should primarily appear from real physical bodies/movement
+// No repeating deterministic patterns
 // ============================================================
 
 #if HAS_DISPLAY
@@ -29,7 +30,7 @@
 const char* TARGET_SERVER_IP  = "192.168.1.100";
 const uint16_t TARGET_PORT    = 4210;
 const char* NODE_ID           = "esp32_node_01";
-const uint32_t SEND_INTERVAL_MS = 400;
+const uint32_t SEND_INTERVAL_MS = 380;
 const int STATUS_LED_PIN      = 2;
 
 const bool USE_REAL_CSI = true;
@@ -52,7 +53,7 @@ unsigned long lastSendTime = 0;
 bool wifiConnected = false;
 int packetCount = 0;
 
-// === Clean Emergent Heat Map ===
+// === Improved Emergent Heat Map ===
 void updateCSIMetrics() {
   float mean = 0;
   for (int i = 0; i < 32; i++) mean += latestRealCSI[i];
@@ -65,38 +66,41 @@ void updateCSIMetrics() {
   }
   csiVariance = variance / 32.0f;
 
-  activityLevel = constrain(csiVariance * 6.8f, 0.0f, 1.0f);
+  activityLevel = constrain(csiVariance * 7.0f, 0.0f, 1.0f);
 
   hotZoneCount = 0;
 
   for (int i = 0; i < GRID_W * GRID_H; i++) {
-    int csiIdx = i % 32;
+    int csiIdx = (i * 3) % 32;   // Less patterned distribution
 
     float current = latestRealCSI[csiIdx];
     float previous = prevCSI[csiIdx];
 
-    // Excitation from current value + movement (temporal change)
-    float excitation = current * 0.8f;
+    // Focus more on change (movement) than raw amplitude
     float change = fabs(current - previous);
-    excitation += change * 2.2f;
+    float excitation = change * 3.5f;
 
-    // Light neighbor influence
-    if (i > 0)               excitation += heatMap[i-1] * 0.015f;
-    if (i < GRID_W*GRID_H-1) excitation += heatMap[i+1] * 0.015f;
+    // Only boost if there's real global activity (reduces noise)
+    if (activityLevel > 0.3f) {
+      excitation += current * 0.6f;
+    }
 
-    // Decay + update (no artificial boosting)
-    heatMap[i] = heatMap[i] * 0.78f + excitation * 0.22f;
-    heatMap[i] = constrain(heatMap[i], 0.0f, 2.3f);
+    // Very gentle neighbor diffusion
+    if (i > 0)               excitation += heatMap[i-1] * 0.012f;
+    if (i < GRID_W*GRID_H-1) excitation += heatMap[i+1] * 0.012f;
 
-    if (heatMap[i] > 1.1f) hotZoneCount++;
+    // Decay + update
+    heatMap[i] = heatMap[i] * 0.82f + excitation * 0.18f;
+    heatMap[i] = constrain(heatMap[i], 0.0f, 2.0f);
+
+    if (heatMap[i] > 1.05f) hotZoneCount++;
   }
 
-  // Save current frame for next temporal comparison
   for (int i = 0; i < 32; i++) {
     prevCSI[i] = latestRealCSI[i];
   }
 
-  significantObstruction = (hotZoneCount >= 5) || (activityLevel > 0.55f);
+  significantObstruction = (hotZoneCount >= 4) || (activityLevel > 0.52f);
 }
 
 // === Real CSI Callback ===
@@ -130,7 +134,7 @@ void initRealCSI() {
   esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
   esp_wifi_set_csi(true);
 
-  for (int i = 0; i < 32; i++) prevCSI[i] = 0.25f;
+  for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
 
   Serial.println("[CSI] Real CSI collection enabled");
 }
@@ -139,11 +143,11 @@ void initRealCSI() {
 #if HAS_DISPLAY
 
 uint16_t heatColor(float v) {
-  v = constrain(v, 0.0f, 2.0f);
-  if (v < 0.25f) return tft.color565(0, 0, (int)(v * 120));
-  if (v < 0.55f) return tft.color565(0, (int)(v * 200), 100);
-  if (v < 1.0f)  return tft.color565((int)(v * 255), 180, 20);
-  return tft.color565(255, (int)((v - 1.0f) * 150), 0);
+  v = constrain(v, 0.0f, 1.9f);
+  if (v < 0.3f)  return tft.color565(0, 0, (int)(v * 110));
+  if (v < 0.6f)  return tft.color565(0, (int)(v * 190), 90);
+  if (v < 1.0f)  return tft.color565((int)(v * 255), 170, 15);
+  return tft.color565(255, (int)((v - 1.0f) * 140), 0);
 }
 
 void drawHeatMap() {
@@ -185,7 +189,7 @@ void initDisplay() {
   tft.init();
   tft.setRotation(1);
 
-  for (int i = 0; i < GRID_W * GRID_H; i++) heatMap[i] = 0.03f;
+  for (int i = 0; i < GRID_W * GRID_H; i++) heatMap[i] = 0.02f;
 
   drawHeatMap();
 }
@@ -274,7 +278,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Heat Map Active ===");
+  Serial.println("=== ESP32 CSI Heat Map (Heartbeat Style) ===");
 }
 
 void loop() {
