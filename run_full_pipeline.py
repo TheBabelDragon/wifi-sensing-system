@@ -118,6 +118,9 @@ def run_pipeline():
             from simulation.generator import generate_test_frame
             raw = generate_test_frame(node_id=f"sim_{config.ROOM_NAME}")
 
+        # Determine operating mode every single frame
+        mode = "REAL" if raw and raw.get("timestamp") != "simulated" else "SIM"
+
         parsed = ingest.parse_packet(raw)
 
         if parsed is None:
@@ -149,7 +152,6 @@ def run_pipeline():
             last_heartbeat = time.time()
 
         if time.time() - last_status_log > 15:
-            mode = "REAL" if raw and raw.get("timestamp") != "simulated" else "SIM"
             logger.info(f"[Pipeline] {mode} | Frame {frame_idx} | Tracks: {len(preds)} | Events: {len(evs)}")
             last_status_log = time.time()
 
@@ -166,7 +168,12 @@ def run_pipeline():
             processing_time = time.time() - start_time
             metrics.record_frame(processing_time, len(preds), evs)
 
-        session_logger.log({"frame": frame_idx, "tracks": len(preds), "events": evs, "mode": mode})
+        session_logger.log({
+            "frame": frame_idx,
+            "tracks": len(preds),
+            "events": evs,
+            "mode": mode
+        })
 
         render_voxel_field(voxels, preds)
         time.sleep(config.DEMO_SLEEP)
