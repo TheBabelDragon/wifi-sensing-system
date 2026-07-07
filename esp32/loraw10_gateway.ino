@@ -4,14 +4,15 @@
 #include <LoRa.h>
 #include <TinyGPS++.h>
 #include <HardwareSerial.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 // ============================================================
-// LoraW10 Gateway
-// ESP-NOW + LoRa + GPS Gateway for WiFi CSI Swarm
-// Generic for Meshnology W10 / TTGO T-Beam style boards
+// LoraW10 Gateway (with OLED)
+// ESP-NOW + LoRa + GPS + Display
 // ============================================================
 
-// === PIN DEFINITIONS (Meshnology W10 / similar boards) ===
+// === PIN DEFINITIONS (adjust for your exact W10 board) ===
 #define LORA_NSS    18
 #define LORA_RST    23
 #define LORA_DIO0   26
@@ -23,8 +24,15 @@
 #define GPS_TX      15   // GPS RX -> ESP32 TX
 #define GPS_BAUD    9600
 
+// OLED I2C pins (common on W10-style boards)
+#define OLED_SDA    21
+#define OLED_SCL    22
+#define OLED_ADDR   0x3C
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
 // === LORA SETTINGS ===
-#define LORA_FREQUENCY  915E6   // Change to 868E6 for EU
+#define LORA_FREQUENCY  915E6
 #define LORA_SYNC_WORD  0x12
 
 // === CONFIG ===
@@ -37,42 +45,64 @@ const uint16_t UDP_TARGET_PORT = 4210;
 // === OBJECTS ===
 WiFiUDP udp;
 TinyGPSPlus gps;
-HardwareSerial GPS_Serial(1);   // Use UART1 for GPS
+HardwareSerial GPS_Serial(1);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // === ESP-NOW Receive ===
 void onDataReceived(const uint8_t * mac, const uint8_t * data, int len) {
-  Serial.printf("[ESP-NOW] Packet from %02X:%02X:%02X:%02X:%02X:%02X (%d bytes)\n",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], len);
+  Serial.printf("[ESP-NOW] Packet received (%d bytes)\n", len);
 
   // Forward via LoRa
   LoRa.beginPacket();
   LoRa.write(data, len);
   LoRa.endPacket();
 
-  // Also forward via UDP if WiFi is connected
+  // Forward via UDP if WiFi is connected
   if (WiFi.status() == WL_CONNECTED) {
     udp.beginPacket(UDP_TARGET_IP, UDP_TARGET_PORT);
     udp.write(data, len);
     udp.endPacket();
   }
 
+  // Show on OLED
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("ESP-NOW RX");
+  display.setCursor(0, 16);
+  display.printf("Len: %d bytes", len);
+  display.display();
+
   Serial.write(data, len);
   Serial.println();
 }
 
-// === Send Gateway Heartbeat + GPS over LoRa ===
+// === Gateway Heartbeat + GPS ===
 void sendGatewayHeartbeat() {
   if (gps.location.isValid()) {
     char payload[128];
     snprintf(payload, sizeof(payload),
-             "{\"gateway\":\"LoraW10\",\"lat\":%.6f,\"lon\":%.6f,\"sats\":%d,\"heartbeat\":true}",
+             "{\"gw\":\"LoraW10\",\"lat\":%.6f,\"lon\":%.6f,\"sats\":%d}",
              gps.location.lat(), gps.location.lng(), gps.satellites.value());
 
     LoRa.beginPacket();
     LoRa.print(payload);
     LoRa.endPacket();
 
-    Serial.printf("[LoRa] Gateway heartbeat sent: %s\n", payload);
+    // Show on display
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Gateway Heartbeat");
+    display.setCursor(0, 16);
+    display.printf("Lat: %.4f", gps.location.lat());
+    display.setCursor(0, 28);
+    display.printf("Lon: %.4f", gps.location.lng());
+    display.display();
+
+    Serial.printf("[LoRa] Heartbeat: %s\n", payload);
   }
 }
 
@@ -80,25 +110,36 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // WiFi (optional for UDP forwarding)
+  // WiFi (optional)
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to WiFi");
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(500);
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) {
+    delay(300);
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\nWiFi OK. IP: %s\n", WiFi.localIP().toString().c_str());
     udp.begin(4211);
   } else {
-    Serial.println("\nRunning without WiFi (LoRa only)");
+    Serial.println("\nLoRa-only mode (no WiFi)");
   }
 
   // GPS
   GPS_Serial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
-  Serial.println("GPS initialized");
+
+  // OLED
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("OLED init failed");
+  } else {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("LoraW10 Gateway");
+    display.display();
+  }
 
   // LoRa
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
@@ -109,32 +150,30 @@ void setup() {
     while (1);
   }
   LoRa.setSyncWord(LORA_SYNC_WORD);
-  LoRa.setSpreadingFactor(10);
-  LoRa.setSignalBandwidth(125E3);
-  Serial.println("LoRa initialized");
+  Serial.println("LoRa OK");
 
   // ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW init failed");
+    Serial.println("ESP-NOW failed");
     while (1);
   }
   esp_now_register_recv_cb(onDataReceived);
-  Serial.println("ESP-NOW ready");
+  Serial.println("ESP-NOW Ready");
 
   Serial.println("=== LoraW10 Gateway Ready ===");
 }
 
 void loop() {
-  // Read GPS
-  while (GPS_Serial.available() > 0) {
+  // GPS
+  while (GPS_Serial.available()) {
     gps.encode(GPS_Serial.read());
   }
 
-  // Send gateway heartbeat every 30 seconds
-  static unsigned long lastHeartbeat = 0;
-  if (millis() - lastHeartbeat > 30000) {
+  // Heartbeat every 30s
+  static unsigned long lastHB = 0;
+  if (millis() - lastHB > 30000) {
     sendGatewayHeartbeat();
-    lastHeartbeat = millis();
+    lastHB = millis();
   }
 
   delay(10);
