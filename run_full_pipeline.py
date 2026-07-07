@@ -155,6 +155,14 @@ def run_pipeline():
             logger.info(f"[Pipeline] {mode} | Frame {frame_idx} | Tracks: {len(preds)} | Events: {len(evs)}")
             last_status_log = time.time()
 
+        # Debug logging for per-frame details (only shown when log level is DEBUG)
+        processing_time = time.time() - start_time
+        logger.debug(
+            f"Frame {frame_idx:04d} | Mode: {mode} | "
+            f"Tracks: {len(preds):2d} | Events: {len(evs):2d} | "
+            f"Processing: {processing_time*1000:.1f} ms"
+        )
+
         state = {
             "frame": frame_idx,
             "tracks": len(preds),
@@ -165,7 +173,6 @@ def run_pipeline():
         dashboard.push(state)
 
         if HAS_METRICS:
-            processing_time = time.time() - start_time
             metrics.record_frame(processing_time, len(preds), evs)
 
         session_logger.log({
