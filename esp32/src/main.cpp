@@ -3,7 +3,7 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
-#include <cmath>                    // for sqrtf
+#include <cmath>
 
 #include <esp_wifi.h>
 #include <esp_wifi_types.h>
@@ -18,6 +18,7 @@
 
   #define TOUCH_CS   33
   #define TOUCH_IRQ  36
+  #define TFT_BL     21          // Backlight pin for CYD
 
   TFT_eSPI tft = TFT_eSPI();
   XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
@@ -58,8 +59,6 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
 void initRealCSI() {
   esp_wifi_set_promiscuous(true);
 
-  // Note: .channel_width was removed because it does not exist
-  // in the current arduino-esp32 wifi_csi_config_t struct
   wifi_csi_config_t csi_config = {
     .lltf_en = true,
     .htltf_en = true,
@@ -78,9 +77,13 @@ void initRealCSI() {
 // === Display (only for CYD) ===
 #if HAS_DISPLAY
 void initDisplay() {
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);     // Turn on backlight
+
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
+
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(2);
   tft.setCursor(10, 10);
