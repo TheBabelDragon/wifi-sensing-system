@@ -1,38 +1,34 @@
-# ESP32 CSI UDP Sender
+# ESP32 CSI Project
 
-## Recommended Approach (Unified Firmware)
+## Project Structure (PlatformIO)
 
-We now use a **single unified sketch** (`esp32_csi_unified.ino`) that supports both:
-
-- Standard ESP32 boards (WROOM-32UE, DevKit, etc.)
-- Cheap Yellow Display (ESP32-2432S028)
-
-### How to choose the board type
-
-**Using the smart flasher script (recommended):**
-
-```bash
-./flash.sh --standard          # Normal ESP32
-./flash.sh --cyd               # Cheap Yellow Display
-./flash.sh --cyd --monitor     # CYD + auto start serial monitor
+```
+esp32/
+├── platformio.ini
+├── src/
+│   └── main.cpp          # Unified code for all boards
+├── flash.sh
+└── README.md
 ```
 
-**Using PlatformIO directly:**
+## Supported Boards
+
+- **Standard ESP32** (WROOM-32UE, DevKit, etc.) → `env:esp32-standard`
+- **Cheap Yellow Display** (ESP32-2432S028) → `env:esp32-cyd`
+
+## Flashing
 
 ```bash
-# Standard ESP32
-pio run --target upload --environment esp32-standard
-
-# Cheap Yellow Display
-pio run --target upload --environment esp32-cyd
+./flash.sh --standard
+./flash.sh --cyd
+./flash.sh --cyd --monitor
 ```
 
-The only difference is controlled by the `HAS_DISPLAY` build flag. No need to maintain two separate sketches anymore.
+The code in `src/main.cpp` uses `#if HAS_DISPLAY` to include or exclude display code at compile time.
 
-## Compilation Check
+## Key Features
 
-Both environments compile cleanly:
-- `esp32-standard` → No display code included
-- `esp32-cyd` → Full TFT + touch support included
-
-You can safely switch between boards without code changes.
+- WiFiManager for configuration
+- Real CSI collection
+- Unified code for multiple hardware platforms
+- Proper `src/main.cpp` structure for PlatformIO
