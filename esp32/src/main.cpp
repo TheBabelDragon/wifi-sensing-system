@@ -10,7 +10,8 @@
 
 // ============================================================
 // WifiMatrixVisionMaxxingMode = always-on
-// Heat map represents real obstructed waveform spaces
+// Purely data-driven. No predetermined bodies.
+// Hot spots emerge only from real CSI perturbations.
 // ============================================================
 
 #if HAS_DISPLAY
@@ -29,21 +30,19 @@
 const char* TARGET_SERVER_IP  = "192.168.1.100";
 const uint16_t TARGET_PORT    = 4210;
 const char* NODE_ID           = "esp32_node_01";
-const uint32_t SEND_INTERVAL_MS = 380;
+const uint32_t SEND_INTERVAL_MS = 360;
 const int STATUS_LED_PIN      = 2;
 
 const bool USE_REAL_CSI = true;
 
-// === DATA ===
 float latestRealCSI[32];
 bool hasNewCSI = false;
 
 float csiVariance = 0;
 float activityLevel = 0;
-bool bodyDetected = false;
-int bodyCount = 0;
+bool significantObstruction = false;
+int hotZoneCount = 0;
 
-// === 20x16 Heat Map (Obstructed Waveform Spaces) ===
 #define GRID_W 20
 #define GRID_H 16
 float heatMap[GRID_W * GRID_H];
@@ -53,9 +52,8 @@ unsigned long lastSendTime = 0;
 bool wifiConnected = false;
 int packetCount = 0;
 
-// === Organic CSI to Heat Map Mapping ===
+// === Purely Data-Driven CSI Processing ===
 void updateCSIMetrics() {
-  // Calculate global metrics
   float mean = 0;
   for (int i = 0; i < 32; i++) mean += latestRealCSI[i];
   mean /= 32.0f;
@@ -67,34 +65,38 @@ void updateCSIMetrics() {
   }
   csiVariance = variance / 32.0f;
 
-  activityLevel = constrain(csiVariance * 7.0f, 0.0f, 1.0f);
-  bodyDetected = (activityLevel > 0.27f);
-  bodyCount = constrain((int)(activityLevel * 3.2f), 0, 3);
+  activityLevel = constrain(csiVariance * 6.8f, 0.0f, 1.0f);
 
-  // === Map CSI into heat map organically ===
+  // === Update Heat Map - Fully Emergent ===
+  hotZoneCount = 0;
+
   for (int i = 0; i < GRID_W * GRID_H; i++) {
-    // Interleave CSI subcarriers across the grid for better spatial feel
-    int csiIdx = (i * 7) % 32;   // pseudo-random but deterministic distribution
+    int csiIdx = (i * 11) % 32; // Good distribution
 
-    float base = latestRealCSI[csiIdx];
+    float current = latestRealCSI[csiIdx];
 
-    // Local excitation from actual subcarrier value
-    float excitation = base * 0.65f;
+    // Base excitation from real subcarrier value
+    float excitation = current * 0.72f;
 
-    // When real activity is high, boost cells that already have energy
-    // This creates emergent hot spots instead of forced ones
-    if (activityLevel > 0.25f) {
-      excitation += (heatMap[i] * 0.4f) * activityLevel;
+    // Only boost cells that are already active (emergent clustering)
+    if (heatMap[i] > 0.4f) {
+      excitation += heatMap[i] * 0.35f * activityLevel;
     }
 
-    // Light diffusion from neighboring cells (organic spreading)
-    if (i > 0)               excitation += heatMap[i-1] * 0.03f;
-    if (i < GRID_W*GRID_H-1) excitation += heatMap[i+1] * 0.03f;
+    // Very light neighbor influence (organic spreading)
+    int left  = (i > 0) ? i - 1 : i;
+    int right = (i < GRID_W*GRID_H-1) ? i + 1 : i;
+    excitation += (heatMap[left] + heatMap[right]) * 0.025f;
 
     // Apply decay + new energy
-    heatMap[i] = heatMap[i] * 0.78f + excitation * 0.22f;
-    heatMap[i] = constrain(heatMap[i], 0.0f, 2.0f);
+    heatMap[i] = heatMap[i] * 0.81f + excitation * 0.19f;
+    heatMap[i] = constrain(heatMap[i], 0.0f, 2.2f);
+
+    // Count how many cells are genuinely hot (emergent hot zones)
+    if (heatMap[i] > 1.1f) hotZoneCount++;
   }
+
+  significantObstruction = (hotZoneCount > 4) || (activityLevel > 0.55f);
 }
 
 // === Real CSI Callback ===
@@ -131,15 +133,15 @@ void initRealCSI() {
   Serial.println("[CSI] Real CSI collection enabled");
 }
 
-// === Heat Map Rendering ===
+// === Heat Map Display ===
 #if HAS_DISPLAY
 
 uint16_t heatColor(float v) {
-  v = constrain(v, 0.0f, 1.8f);
-  if (v < 0.25f) return tft.color565(5, 5, (int)(v * 160));
-  if (v < 0.55f) return tft.color565(0, (int)(v * 180), 160);
-  if (v < 1.0f)  return tft.color565((int)(v * 240), 200, 20);
-  return tft.color565(255, (int)((v - 1.0f) * 180), 10);
+  v = constrain(v, 0.0f, 2.0f);
+  if (v < 0.3f)  return tft.color565(0, 0, (int)(v * 140));
+  if (v < 0.6f)  return tft.color565(0, (int)(v * 200), 140);
+  if (v < 1.1f)  return tft.color565((int)(v * 255), 220, 30);
+  return tft.color565(255, (int)((v - 1.1f) * 160), 0);
 }
 
 void drawHeatMap() {
@@ -153,21 +155,21 @@ void drawHeatMap() {
       int idx = y * GRID_W + x;
       float val = heatMap[idx];
       uint16_t col = heatColor(val);
-      tft.fillRect(x * cellW, y * cellH, cellW - 1, cellH - 1, col);
+      tft.fillRect(x * cellW, y * cellH, cellW-1, cellH-1, col);
     }
   }
 
-  // Status bar
+  // Status
   tft.fillRect(0, 0, 320, 20, TFT_BLACK);
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(1);
   tft.setCursor(5, 5);
-  tft.printf("%s  RSSI:%d  Heat:%.2f  Bodies:%d", NODE_ID, (int)WiFi.RSSI(), activityLevel, bodyCount);
+  tft.printf("%s  RSSI:%d  Heat:%.2f  HotZones:%d", NODE_ID, (int)WiFi.RSSI(), activityLevel, hotZoneCount);
 
-  if (bodyDetected) {
+  if (significantObstruction) {
     tft.setTextColor(TFT_RED);
     tft.setCursor(5, 225);
-    tft.print("HOTSPOTS - OBSTRUCTION DETECTED");
+    tft.print("SIGNIFICANT OBSTRUCTION DETECTED");
   } else {
     tft.setTextColor(TFT_GREEN);
     tft.setCursor(5, 225);
@@ -182,9 +184,7 @@ void initDisplay() {
   tft.init();
   tft.setRotation(1);
 
-  for (int i = 0; i < GRID_W * GRID_H; i++) {
-    heatMap[i] = 0.08f;
-  }
+  for (int i = 0; i < GRID_W * GRID_H; i++) heatMap[i] = 0.05f;
 
   drawHeatMap();
 }
@@ -235,8 +235,8 @@ void sendCSIPacket() {
   doc["rssi"] = (int)rssi;
   doc["type"] = "wifi_csi";
   doc["activity"] = activityLevel;
-  doc["body_detected"] = bodyDetected;
-  doc["body_count"] = bodyCount;
+  doc["significant_obstruction"] = significantObstruction;
+  doc["hot_zones"] = hotZoneCount;
 
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
@@ -255,7 +255,7 @@ void sendCSIPacket() {
     updateDisplay(rssi);
   #endif
 
-  Serial.printf("[UDP] Sent | RSSI=%d | Heat=%.2f | Bodies=%d\n", (int)rssi, activityLevel, bodyCount);
+  Serial.printf("[UDP] Sent | RSSI=%d | Heat=%.2f | HotZones=%d\n", (int)rssi, activityLevel, hotZoneCount);
 }
 
 void setup() {
@@ -273,7 +273,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 WifiMatrixVisionMaxxingMode Active ===");
+  Serial.println("=== ESP32 WifiMatrixVisionMaxxingMode (Pure Data-Driven) ===");
 }
 
 void loop() {
