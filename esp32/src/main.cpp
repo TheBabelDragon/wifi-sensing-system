@@ -24,30 +24,36 @@
   XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
 #endif
 
-// === USER CONFIGURATION ===
+// === CONFIG ===
 const char* TARGET_SERVER_IP  = "192.168.1.100";
 const uint16_t TARGET_PORT    = 4210;
 const char* NODE_ID           = "esp32_node_01";
-const uint32_t SEND_INTERVAL_MS = 500;
+const uint32_t SEND_INTERVAL_MS = 400;
 const int STATUS_LED_PIN      = 2;
 
 const bool USE_REAL_CSI = true;
 
+// === CSI DATA ===
 float latestRealCSI[32];
 bool hasNewCSI = false;
+
+// === ENHANCED METRICS ===
+float csiVariance = 0;
+float activityLevel = 0;
+bool bodyDetected = false;
+int bodyCount = 0;
+
+// === HEAT MAP (Waveform Obstruction Spaces) ===
+#define GRID_W 20
+#define GRID_H 16
+float heatMap[GRID_W * GRID_H];
 
 WiFiUDP udp;
 unsigned long lastSendTime = 0;
 bool wifiConnected = false;
 int packetCount = 0;
 
-// === Enhanced CSI Metrics ===
-float csiVariance = 0;
-float activityLevel = 0;
-bool bodyDetected = false;
-int bodyCount = 0;
-float bodyPositions[3] = {0}; // relative horizontal positions
-
+// === CSI Processing + Heat Map Update ===
 void updateCSIMetrics() {
   float mean = 0;
   for (int i = 0; i < 32; i++) mean += latestRealCSI[i];
@@ -60,19 +66,31 @@ void updateCSIMetrics() {
   }
   csiVariance = variance / 32.0f;
 
-  activityLevel = constrain(csiVariance * 7.5f, 0.0f, 1.0f);
-  bodyDetected = (activityLevel > 0.25f);
+  activityLevel = constrain(csiVariance * 7.2f, 0.0f, 1.0f);
+  bodyDetected = (activityLevel > 0.26f);
+  bodyCount = constrain((int)(activityLevel * 3.5f), 0, 3);
 
-  // Estimate number of bodies and positions (simple clustering)
-  bodyCount = 0;
-  if (activityLevel > 0.25f) bodyCount++;
-  if (activityLevel > 0.55f) bodyCount++;
-  if (activityLevel > 0.80f) bodyCount++;
+  // === Update Heat Map (Obstruction Waveform Spaces) ===
+  // Map 32 CSI values across the 20x16 grid
+  for (int i = 0; i < GRID_W * GRID_H; i++) {
+    int csiIndex = i % 32;
+    float base = latestRealCSI[csiIndex];
 
-  // Fake some horizontal spread for multiple bodies
-  bodyPositions[0] = (activityLevel - 0.5f) * 60;
-  bodyPositions[1] = (activityLevel - 0.3f) * 90;
-  bodyPositions[2] = (activityLevel - 0.7f) * 50;
+    // Excite cells based on CSI + global activity
+    float excitation = base * 0.7f + activityLevel * 0.9f;
+
+    // Add localized hot spots when bodies are detected
+    if (bodyDetected) {
+      int hotX = (i % GRID_W);
+      int hotY = (i / GRID_W);
+      float dist = abs(hotX - 10) + abs(hotY - 8); // center bias
+      if (dist < 6) excitation += (0.6f - dist * 0.08f) * activityLevel;
+    }
+
+    // Simple persistence + decay
+    heatMap[i] = heatMap[i] * 0.82f + excitation * 0.18f;
+    heatMap[i] = constrain(heatMap[i], 0.0f, 1.8f);
+  }
 }
 
 // === Real CSI Callback ===
@@ -109,76 +127,51 @@ void initRealCSI() {
   Serial.println("[CSI] Real CSI collection enabled");
 }
 
-// === Sick First-Person Perspective View ===
+// === Heat Map Visualization (Obstruction Waveform Spaces) ===
 #if HAS_DISPLAY
 
-void drawFirstPersonView() {
+uint16_t heatColor(float v) {
+  v = constrain(v, 0.0f, 1.6f);
+  if (v < 0.3f) return tft.color565(0, 0, (int)(v * 180));           // Deep blue
+  if (v < 0.6f) return tft.color565(0, (int)(v * 200), 180);           // Cyan
+  if (v < 1.0f) return tft.color565((int)(v * 220), 220, 0);           // Yellow
+  return tft.color565(255, (int)((v - 1.0f) * 200), 0);                // Hot white/red
+}
+
+void drawHeatMap() {
   tft.fillScreen(TFT_BLACK);
 
-  // Horizon + sky gradient feel
-  tft.fillRect(0, 0, 320, 120, TFT_NAVY);
-  tft.drawFastHLine(0, 120, 320, TFT_WHITE);
+  const int cellW = 16;
+  const int cellH = 15;
+  const int startX = 0;
+  const int startY = 0;
 
-  // Perspective floor grid (stronger depth)
-  for (int i = 0; i < 7; i++) {
-    int y = 120 + i * 18;
-    int w = 40 + i * 38;
-    tft.drawFastHLine(160 - w/2, y, w, TFT_DARKGREY);
+  for (int y = 0; y < GRID_H; y++) {
+    for (int x = 0; x < GRID_W; x++) {
+      int idx = y * GRID_W + x;
+      float val = heatMap[idx];
+
+      uint16_t col = heatColor(val);
+      tft.fillRect(startX + x * cellW, startY + y * cellH, cellW - 1, cellH - 1, col);
+    }
   }
 
-  // Draw obstruction bodies in first-person view
-  for (int b = 0; b < min(3, bodyCount); b++) {
-    if (activityLevel < 0.2f) break;
-
-    float strength = activityLevel - (b * 0.15f);
-    if (strength < 0.15f) continue;
-
-    int bodyWidth  = map(strength * 100, 0, 100, 18, 70);
-    int bodyHeight = map(strength * 100, 0, 100, 35, 110);
-
-    int xOffset = bodyPositions[b];
-    int xPos = 160 + xOffset;
-    int yBottom = 118;
-    int yTop = yBottom - bodyHeight;
-
-    // Body (cyan with white outline)
-    tft.fillRect(xPos - bodyWidth/2, yTop, bodyWidth, bodyHeight, TFT_CYAN);
-    tft.drawRect(xPos - bodyWidth/2, yTop, bodyWidth, bodyHeight, TFT_WHITE);
-
-    // Simple head
-    int headSize = bodyWidth / 2;
-    tft.fillCircle(xPos, yTop - headSize/2, headSize, TFT_CYAN);
-    tft.drawCircle(xPos, yTop - headSize/2, headSize, TFT_WHITE);
-
-    // Distance label
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(xPos - 12, yBottom + 4);
-    tft.printf("%.1fm", 1.5f + b * 0.8f);
-  }
-
-  // Top status bar
-  tft.fillRect(0, 0, 320, 22, TFT_BLACK);
+  // Status overlay
+  tft.fillRect(0, 0, 320, 20, TFT_BLACK);
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(6, 6);
-  tft.printf("%s  RSSI:%d  Act:%.2f  Bodies:%d", NODE_ID, (int)WiFi.RSSI(), activityLevel, bodyCount);
+  tft.setCursor(5, 5);
+  tft.printf("%s  RSSI:%d  Heat:%.2f  Bodies:%d", NODE_ID, (int)WiFi.RSSI(), activityLevel, bodyCount);
 
-  // Bottom info
   if (bodyDetected) {
     tft.setTextColor(TFT_RED);
-    tft.setCursor(6, 225);
-    tft.print("OBSTRUCTION DETECTED");
+    tft.setCursor(5, 225);
+    tft.print("HOTSPOTS DETECTED - OBSTRUCTION");
   } else {
     tft.setTextColor(TFT_GREEN);
-    tft.setCursor(6, 225);
-    tft.print("CLEAR");
+    tft.setCursor(5, 225);
+    tft.print("CLEAR - NO SIGNIFICANT OBSTRUCTION");
   }
-
-  // Small activity bar on the right
-  int barHeight = activityLevel * 80;
-  tft.fillRect(305, 140, 10, 80, TFT_DARKGREY);
-  tft.fillRect(305, 220 - barHeight, 10, barHeight, TFT_CYAN);
 }
 
 void initDisplay() {
@@ -187,11 +180,15 @@ void initDisplay() {
 
   tft.init();
   tft.setRotation(1);
-  drawFirstPersonView();
+
+  // Initialize heat map
+  for (int i = 0; i < GRID_W * GRID_H; i++) heatMap[i] = 0.1f;
+
+  drawHeatMap();
 }
 
 void updateDisplay(float rssi) {
-  drawFirstPersonView();
+  drawHeatMap();
 }
 
 #endif
@@ -256,7 +253,7 @@ void sendCSIPacket() {
     updateDisplay(rssi);
   #endif
 
-  Serial.printf("[UDP] Sent | RSSI=%d | Act=%.2f | Bodies=%d\n", (int)rssi, activityLevel, bodyCount);
+  Serial.printf("[UDP] Sent | RSSI=%d | Heat=%.2f | Bodies=%d\n", (int)rssi, activityLevel, bodyCount);
 }
 
 void setup() {
@@ -274,7 +271,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node Ready (Sick First-Person View) ===");
+  Serial.println("=== ESP32 CSI Heat Map Node Ready ===");
 }
 
 void loop() {
@@ -285,5 +282,5 @@ void loop() {
     lastSendTime = now;
   }
 
-  delay(10);
+  delay(8);
 }
