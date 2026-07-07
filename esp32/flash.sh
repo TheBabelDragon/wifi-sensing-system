@@ -1,35 +1,22 @@
 #!/usr/bin/env bash
 #
-# flash.sh - Smart unified flasher for ESP32 CSI nodes
-# Supports standard ESP32 and Cheap Yellow Display (CYD)
+# flash.sh - Unified ESP32 CSI flasher (src/main.cpp structure)
 
 set -euo pipefail
 
-SKETCH="esp32_csi_unified.ino"
-DEFAULT_ENV="esp32-standard"
-
-ENV="${ENV:-$DEFAULT_ENV}"
+ENV="esp32-standard"
 PORT=""
 DO_ERASE=false
 AUTO_MONITOR=false
 
 show_help() {
   cat <<EOF
-ESP32 CSI Unified Flasher
+ESP32 CSI Flasher (src/main.cpp)
 
-Usage: $0 [options]
-
-Options:
-  --cyd              Flash for Cheap Yellow Display (ESP32-2432S028)
-  --standard         Flash for normal ESP32 boards (default)
-  -p, --port PORT    Specify serial port
-  -e, --erase        Full chip erase before flashing
-  -m, --monitor      Start serial monitor after upload
-  -h, --help         Show help
-
-Examples:
-  $0 --cyd
-  $0 --standard -p /dev/ttyUSB0 --monitor
+Usage:
+  $0 --standard          # Normal ESP32 boards
+  $0 --cyd               # Cheap Yellow Display
+  $0 --cyd -p /dev/ttyUSB0 --monitor
 EOF
 }
 
@@ -45,43 +32,24 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-print_header() { echo -e "\n\033[1;36m=== $1 ===\033[0m"; }
-print_success() { echo -e "\033[1;32m✓ $1\033[0m"; }
-
-print_header "ESP32 CSI Unified Flasher"
-
-echo "Sketch     : $SKETCH"
-echo "Environment: $ENV"
-echo "Port       : $PORT"
-echo
-
-if ! command -v pio >/dev/null 2>&1; then
-  echo "Error: PlatformIO CLI not found"
-  exit 1
-fi
-
 if [[ -z "$PORT" ]]; then
   PORT="/dev/ttyUSB0"
 fi
 
+if ! command -v pio >/dev/null 2>&1; then
+  echo "PlatformIO not found"
+  exit 1
+fi
+
 if $DO_ERASE; then
-  echo "Performing full chip erase..."
   pio run --target erase --environment "$ENV" --upload-port "$PORT" || true
 fi
 
-print_header "Compiling and Uploading"
-
-echo "Running: pio run --target upload --environment $ENV --upload-port $PORT"
-
-if pio run --target upload --environment "$ENV" --upload-port "$PORT"; then
-  print_success "Upload successful!"
-else
-  echo "Upload failed. Try with --erase if you changed partition scheme."
-  exit 1
-fi
+echo "Uploading with environment: $ENV"
+pio run --target upload --environment "$ENV" --upload-port "$PORT"
 
 if $AUTO_MONITOR; then
   pio device monitor --environment "$ENV" --port "$PORT"
 fi
 
-print_success "Done."
+echo "Done."
