@@ -53,6 +53,9 @@ from dashboard.server import DashboardServer
 from bridges.swarm_bridge import SwarmBridge
 from visualization.text_viz import render_voxel_field
 
+# New multi-node fusion
+from swarm.node_manager import NodeManager
+
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 logger = logging.getLogger("csi-system")
 
@@ -87,6 +90,9 @@ def run_pipeline():
     dashboard = DashboardServer()
     swarm_bridge = SwarmBridge(redis_url=config.REDIS_URL)
 
+    # === Multi-node Fusion Layer ===
+    node_manager = NodeManager(room_size=(12.0, 10.0), grid_resolution=20)
+
     aurora.register_node(f"esp32_{config.ROOM_NAME}_01", {"pos": (2,2), "type": "sensing"})
 
     if HAS_WEB:
@@ -104,6 +110,7 @@ def run_pipeline():
 
     last_heartbeat = time.time()
     last_status_log = time.time()
+    last_fusion_log = time.time()
 
     logger.info("Starting main ingestion loop (real UDP + fallback simulation)...")
 
@@ -132,7 +139,16 @@ def run_pipeline():
                 handle_gateway_data(parsed["data"])
                 continue
 
-            # === Normal WiFi CSI Processing Pipeline ===
+            # === Multi-node Registration ===
+            node_id = parsed.get("node", "unknown")
+            node_manager.register_or_update(node_id, {
+                "rssi": parsed.get("rssi", 0),
+                "activity": parsed.get("activity", 0.0),
+                "hot_zones": parsed.get("hot_zones", 0),
+                "obstruction": parsed.get("obstruction", False)
+            })
+
+            # === Normal WiFi CSI Processing Pipeline (existing) ===
             calibrated = calib.calibrate(parsed)
             voxels = fusion.fuse(calibrated)
             tracks = tracker.update(voxels)
@@ -156,6 +172,14 @@ def run_pipeline():
             if time.time() - last_status_log > 15:
                 logger.info(f"[Pipeline] {mode} | Frame {frame_idx} | Tracks: {len(preds)} | Events: {len(evs)}")
                 last_status_log = time.time()
+
+            # Periodically log fused room state
+            if time.time() - last_fusion_log > 10:
+                room_state = node_manager.get_room_state()
+                logger.info(f"[Fusion] Nodes: {room_state['node_count']} | "
+                            f"Activity: {room_state['total_activity']} | "
+                            f"Obstruction Prob: {room_state['obstruction_probability']}")
+                last_fusion_log = time.time()
 
             # Debug logging for per-frame details
             processing_time = time.time() - start_time
@@ -186,10 +210,12 @@ def run_pipeline():
 
             render_voxel_field(voxels, preds)
 
+            # Optional: cleanup stale nodes
+            node_manager.cleanup_stale_nodes(timeout_seconds=45.0)
+
         except Exception as e:
             logger.error(f"Error processing frame {frame_idx}: {e}")
             logger.debug(traceback.format_exc())
-            # Continue to next frame instead of crashing the whole pipeline
             continue
 
         time.sleep(config.DEMO_SLEEP)
