@@ -12,7 +12,7 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - Clean + Robust (ESP-NOW Fallback + RGB)
+// ESP32 CSI Node - Always-on ESP-NOW + Rich Features
 // ============================================================
 
 #if HAS_DISPLAY
@@ -78,7 +78,7 @@ void updateRGBStatus() {
   } else if (activityLevel > 0.4) {
     setRGB(255, 200, 0);
   } else if (!wifiConnected && espnowReady) {
-    setRGB(0, 150, 255);
+    setRGB(0, 150, 255);     // Cyan = ESP-NOW only
   } else if (!wifiConnected) {
     setRGB(0, 0, 255);
   } else if (nodeConfidence > 0.75) {
@@ -88,11 +88,17 @@ void updateRGBStatus() {
   }
 }
 
-// === ESP-NOW ===
+// === ESP-NOW (Always initialized when enabled) ===
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {}
 
 void initESPNow() {
-  if (esp_now_init() != ESP_OK) return;
+  Serial.println("[ESP-NOW] Initializing...");
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESP-NOW] Init FAILED");
+    return;
+  }
+
   esp_now_register_send_cb(onDataSent);
 
   esp_now_peer_info_t peerInfo = {};
@@ -100,9 +106,13 @@ void initESPNow() {
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
 
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) return;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("[ESP-NOW] Failed to add broadcast peer");
+    return;
+  }
+
   espnowReady = true;
-  Serial.println("[ESP-NOW] Ready");
+  Serial.println("[ESP-NOW] Ready (broadcast mode)");
 }
 
 void sendViaESPNow() {
@@ -218,7 +228,7 @@ void initRealCSI() {
   esp_wifi_set_csi(true);
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
-  Serial.println("[CSI] Rich Features + ESP-NOW Fallback ready");
+  Serial.println("[CSI] Rich 4-Band Features enabled");
 }
 
 // === WiFi + ESP-NOW ===
@@ -235,8 +245,7 @@ void connectWiFi() {
     Serial.println("WiFi connected");
     setRGB(0, 180, 0);
   } else {
-    Serial.println("Falling back to ESP-NOW only mode");
-    if (USE_ESP_NOW) initESPNow();
+    Serial.println("No WiFi - running in ESP-NOW only mode");
     setRGB(0, 150, 255);
   }
 }
@@ -249,10 +258,12 @@ void sendCSIPacket() {
     updateRichCSIFeatures();
   }
 
+  // Always try ESP-NOW if ready
   if (USE_ESP_NOW && espnowReady) {
     sendViaESPNow();
   }
 
+  // Also send via UDP if WiFi is connected
   if (wifiConnected) {
     StaticJsonDocument<1600> doc;
     doc["node"] = NODE_ID;
@@ -301,6 +312,11 @@ void setup() {
   rgbLed.setBrightness(80);
   setRGB(255, 0, 255);
 
+  // Always initialize ESP-NOW early if enabled
+  if (USE_ESP_NOW) {
+    initESPNow();
+  }
+
   connectWiFi();
 
   if (USE_REAL_CSI) {
@@ -309,7 +325,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node Ready (ESP-NOW Fallback) ===");
+  Serial.println("=== ESP32 CSI Node Ready (ESP-NOW Always Active) ===");
 }
 
 void loop() {
