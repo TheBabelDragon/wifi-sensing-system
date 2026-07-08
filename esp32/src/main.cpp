@@ -9,7 +9,7 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - Rich Per-Node Features (CYD + WROOM)
+// ESP32 CSI Node - Frequency Band Aware (4-band grouping)
 // ============================================================
 
 #if HAS_DISPLAY
@@ -38,6 +38,9 @@ float latestRealCSI[32];
 float prevCSI[32];
 bool hasNewCSI = false;
 
+// Per-band features (4 bands of 8 subcarriers)
+float bandMovement[4] = {0};
+float bandVariance[4] = {0};
 float movementIntensity = 0.0;
 float nodeConfidence  = 0.6;
 
@@ -68,40 +71,66 @@ void updateLED() {
 
 void setLedMode(int mode) { ledMode = mode; }
 
-// === Rich Per-Node CSI Features ===
-void updateRichCSIFeatures() {
-  float mean = 0;
-  for (int i = 0; i < 32; i++) mean += latestRealCSI[i];
-  mean /= 32.0f;
+// === Frequency Band Aware CSI Features ===
+void updateBandAwareCSIFeatures() {
+  // Calculate per-band movement and variance
+  for (int b = 0; b < 4; b++) {
+    int start = b * 8;
+    float mean = 0;
+    float maxChange = 0;
+    float var = 0;
 
-  float variance = 0;
-  float maxChange = 0;
-  for (int i = 0; i < 32; i++) {
-    float diff = latestRealCSI[i] - mean;
-    variance += diff * diff;
+    for (int i = 0; i < 8; i++) {
+      int idx = start + i;
+      mean += latestRealCSI[idx];
 
-    float change = fabs(latestRealCSI[i] - prevCSI[i]);
-    if (change > maxChange) maxChange = change;
+      float change = fabs(latestRealCSI[idx] - prevCSI[idx]);
+      if (change > maxChange) maxChange = change;
+    }
+    mean /= 8.0f;
+
+    for (int i = 0; i < 8; i++) {
+      int idx = start + i;
+      float diff = latestRealCSI[idx] - mean;
+      var += diff * diff;
+    }
+
+    bandMovement[b] = maxChange;
+    bandVariance[b] = var / 8.0f;
   }
-  csiVariance = variance / 32.0f;
 
-  // Movement intensity (stronger temporal change signal)
-  movementIntensity = constrain(maxChange * 4.5f + csiVariance * 1.8f, 0.0f, 1.0f);
+  // Overall variance
+  float meanAll = 0;
+  for (int i = 0; i < 32; i++) meanAll += latestRealCSI[i];
+  meanAll /= 32.0f;
 
-  activityLevel = constrain(csiVariance * 6.5f + movementIntensity * 0.8f, 0.0f, 1.0f);
+  float varianceAll = 0;
+  for (int i = 0; i < 32; i++) {
+    float diff = latestRealCSI[i] - meanAll;
+    varianceAll += diff * diff;
+  }
+  csiVariance = varianceAll / 32.0f;
+
+  // Movement intensity: take strongest band + overall variance
+  float strongestBand = 0;
+  for (int b = 0; b < 4; b++) {
+    if (bandMovement[b] > strongestBand) strongestBand = bandMovement[b];
+  }
+
+  movementIntensity = constrain(strongestBand * 4.8f + csiVariance * 1.6f, 0.0f, 1.0f);
+
+  activityLevel = constrain(csiVariance * 6.2f + movementIntensity * 0.9f, 0.0f, 1.0f);
   hotZoneCount = constrain((int)(activityLevel * 6), 0, 6);
   significantObstruction = (hotZoneCount >= 3) || (activityLevel > 0.58f);
 
-  // Confidence model
+  // Confidence
   static float prevMovement = 0;
   float consistency = 1.0f - fabs(movementIntensity - prevMovement);
   nodeConfidence = constrain(0.4f + consistency * 0.5f + (packetCount / 80.0f) * 0.3f, 0.35f, 0.92f);
   prevMovement = movementIntensity;
 
-  // Update LED
   setLedMode(significantObstruction ? 1 : 0);
 
-  // Store for next frame
   for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 }
 
@@ -118,7 +147,7 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
     if (latestRealCSI[i] > 1.0f) latestRealCSI[i] = 1.0f;
   }
   hasNewCSI = true;
-  updateRichCSIFeatures();
+  updateBandAwareCSIFeatures();
 }
 
 void initRealCSI() {
@@ -138,7 +167,7 @@ void initRealCSI() {
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
 
-  Serial.println("[CSI] Real CSI + Rich Features enabled");
+  Serial.println("[CSI] Real CSI + 4-Band Features enabled");
 }
 
 // === WiFiManager ===
@@ -167,26 +196,30 @@ void sendCSIPacket() {
 
   if (!USE_REAL_CSI) {
     for (int i = 0; i < 32; i++) latestRealCSI[i] = 0.45f + (random(40) / 100.0f);
-    updateRichCSIFeatures();
+    updateBandAwareCSIFeatures();
   }
 
-  StaticJsonDocument<1400> doc;
+  StaticJsonDocument<1600> doc;
   doc["node"] = NODE_ID;
   doc["timestamp"] = millis();
   doc["rssi"] = (int)rssi;
   doc["type"] = "wifi_csi";
 
-  // Rich per-node features
+  // Rich features
   doc["activity"] = activityLevel;
   doc["hot_zones"] = hotZoneCount;
   doc["obstruction"] = significantObstruction;
   doc["movement_intensity"] = movementIntensity;
   doc["confidence"] = nodeConfidence;
 
+  // Per-band movement (for richer upstream analysis)
+  JsonArray bandMov = doc.createNestedArray("band_movement");
+  for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
+
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
 
-  char jsonBuffer[1400];
+  char jsonBuffer[1600];
   serializeJson(doc, jsonBuffer);
 
   if (USE_ESP_NOW) {
@@ -202,7 +235,6 @@ void sendCSIPacket() {
   packetCount++;
   hasNewCSI = false;
 
-  // Quick LED flash
   digitalWrite(STATUS_LED_PIN, HIGH);
   delay(20);
   digitalWrite(STATUS_LED_PIN, LOW);
@@ -226,7 +258,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node (Rich Features) Ready ===");
+  Serial.println("=== ESP32 CSI Node (4-Band Features) Ready ===");
 }
 
 void loop() {
