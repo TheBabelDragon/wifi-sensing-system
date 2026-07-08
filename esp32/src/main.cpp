@@ -12,8 +12,7 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - Full ESP-NOW Safe Fallback
-// Works on esp32-standard, esp32-cyd, and esp32-s3
+// ESP32 CSI Node - Clean + Robust (ESP-NOW Fallback + RGB)
 // ============================================================
 
 #if HAS_DISPLAY
@@ -42,6 +41,7 @@ Adafruit_NeoPixel rgbLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // ESP-NOW
 const bool USE_ESP_NOW = true;
+const bool USE_REAL_CSI = true;
 const uint8_t BROADCAST_ADDRESS[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 float latestRealCSI[32];
@@ -78,9 +78,9 @@ void updateRGBStatus() {
   } else if (activityLevel > 0.4) {
     setRGB(255, 200, 0);
   } else if (!wifiConnected && espnowReady) {
-    setRGB(0, 150, 255);     // Cyan = ESP-NOW only mode
+    setRGB(0, 150, 255);
   } else if (!wifiConnected) {
-    setRGB(0, 0, 255);       // Blue = connecting / no network
+    setRGB(0, 0, 255);
   } else if (nodeConfidence > 0.75) {
     setRGB(0, 255, 200);
   } else {
@@ -89,16 +89,10 @@ void updateRGBStatus() {
 }
 
 // === ESP-NOW ===
-void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  // Optional callback
-}
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {}
 
 void initESPNow() {
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("[ESP-NOW] Init failed");
-    return;
-  }
-
+  if (esp_now_init() != ESP_OK) return;
   esp_now_register_send_cb(onDataSent);
 
   esp_now_peer_info_t peerInfo = {};
@@ -106,13 +100,9 @@ void initESPNow() {
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
 
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("[ESP-NOW] Failed to add broadcast peer");
-    return;
-  }
-
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) return;
   espnowReady = true;
-  Serial.println("[ESP-NOW] Ready (broadcast mode)");
+  Serial.println("[ESP-NOW] Ready");
 }
 
 void sendViaESPNow() {
@@ -137,7 +127,6 @@ void sendViaESPNow() {
 
   char jsonBuffer[1600];
   serializeJson(doc, jsonBuffer);
-
   esp_now_send(BROADCAST_ADDRESS, (uint8_t*)jsonBuffer, strlen(jsonBuffer));
 }
 
@@ -184,7 +173,6 @@ void updateRichCSIFeatures() {
   }
 
   movementIntensity = constrain(strongestBand * 4.8f + csiVariance * 1.6f, 0.0f, 1.0f);
-
   activityLevel = constrain(csiVariance * 6.2f + movementIntensity * 0.9f, 0.0f, 1.0f);
   hotZoneCount = constrain((int)(activityLevel * 6), 0, 6);
   significantObstruction = (hotZoneCount >= 3) || (activityLevel > 0.58f);
@@ -195,7 +183,6 @@ void updateRichCSIFeatures() {
   prevMovement = movementIntensity;
 
   updateRGBStatus();
-
   for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 }
 
@@ -231,13 +218,12 @@ void initRealCSI() {
   esp_wifi_set_csi(true);
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
-
-  Serial.println("[CSI] Rich 4-Band Features + ESP-NOW Fallback enabled");
+  Serial.println("[CSI] Rich Features + ESP-NOW Fallback ready");
 }
 
-// === WiFiManager with ESP-NOW Fallback ===
+// === WiFi + ESP-NOW ===
 void connectWiFi() {
-  setRGB(0, 0, 255); // Blue while connecting
+  setRGB(0, 0, 255);
 
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(35);
@@ -249,11 +235,9 @@ void connectWiFi() {
     Serial.println("WiFi connected");
     setRGB(0, 180, 0);
   } else {
-    Serial.println("No WiFi - falling back to ESP-NOW only mode");
-    if (USE_ESP_NOW) {
-      initESPNow();
-    }
-    setRGB(0, 150, 255); // Cyan = ESP-NOW fallback active
+    Serial.println("Falling back to ESP-NOW only mode");
+    if (USE_ESP_NOW) initESPNow();
+    setRGB(0, 150, 255);
   }
 }
 
@@ -265,12 +249,10 @@ void sendCSIPacket() {
     updateRichCSIFeatures();
   }
 
-  // Send via ESP-NOW if available (safe fallback)
   if (USE_ESP_NOW && espnowReady) {
     sendViaESPNow();
   }
 
-  // Also try UDP if WiFi is connected
   if (wifiConnected) {
     StaticJsonDocument<1600> doc;
     doc["node"] = NODE_ID;
@@ -300,7 +282,6 @@ void sendCSIPacket() {
   packetCount++;
   hasNewCSI = false;
 
-  // Quick white flash
   setRGB(255, 255, 255);
   delay(25);
   updateRGBStatus();
@@ -318,7 +299,7 @@ void setup() {
 
   rgbLed.begin();
   rgbLed.setBrightness(80);
-  setRGB(255, 0, 255); // Purple during boot
+  setRGB(255, 0, 255);
 
   connectWiFi();
 
@@ -328,7 +309,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node (ESP-NOW Safe Fallback) Ready ===");
+  Serial.println("=== ESP32 CSI Node Ready (ESP-NOW Fallback) ===");
 }
 
 void loop() {
