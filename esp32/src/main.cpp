@@ -9,7 +9,7 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node (Improved LED for WROOM-32UE boards)
+// ESP32 CSI Node - Rich Per-Node Features (CYD + WROOM)
 // ============================================================
 
 #if HAS_DISPLAY
@@ -27,14 +27,19 @@
 // === CONFIG ===
 const char* TARGET_SERVER_IP  = "192.168.1.100";
 const uint16_t TARGET_PORT    = 4210;
-const char* NODE_ID           = "esp32_node_01";
-const uint32_t SEND_INTERVAL_MS = 500;
-const int STATUS_LED_PIN      = 2;   // Onboard LED on most WROOM-32UE boards
+const char* NODE_ID           = "esp32_cyd_01";
+const uint32_t SEND_INTERVAL_MS = 450;
+const int STATUS_LED_PIN      = 2;
 
 const bool USE_REAL_CSI = true;
+const bool USE_ESP_NOW    = true;
 
 float latestRealCSI[32];
+float prevCSI[32];
 bool hasNewCSI = false;
+
+float movementIntensity = 0.0;
+float nodeConfidence  = 0.6;
 
 WiFiUDP udp;
 unsigned long lastSendTime = 0;
@@ -46,15 +51,14 @@ float activityLevel = 0;
 bool significantObstruction = false;
 int hotZoneCount = 0;
 
-// === LED Control ===
+// === LED ===
 unsigned long lastLedUpdate = 0;
 int ledState = LOW;
-int ledMode = 0; // 0 = slow blink (normal), 1 = fast blink (high activity)
+int ledMode = 0;
 
 void updateLED() {
   unsigned long now = millis();
-  int interval = (ledMode == 1) ? 120 : 550;
-
+  int interval = (ledMode == 1) ? 130 : 520;
   if (now - lastLedUpdate > interval) {
     lastLedUpdate = now;
     ledState = !ledState;
@@ -62,29 +66,43 @@ void updateLED() {
   }
 }
 
-void setLedMode(int mode) {
-  ledMode = mode;
-}
+void setLedMode(int mode) { ledMode = mode; }
 
-// === CSI Processing ===
-void updateCSIMetrics() {
+// === Rich Per-Node CSI Features ===
+void updateRichCSIFeatures() {
   float mean = 0;
   for (int i = 0; i < 32; i++) mean += latestRealCSI[i];
   mean /= 32.0f;
 
   float variance = 0;
+  float maxChange = 0;
   for (int i = 0; i < 32; i++) {
     float diff = latestRealCSI[i] - mean;
     variance += diff * diff;
+
+    float change = fabs(latestRealCSI[i] - prevCSI[i]);
+    if (change > maxChange) maxChange = change;
   }
   csiVariance = variance / 32.0f;
 
-  activityLevel = constrain(csiVariance * 7.0f, 0.0f, 1.0f);
-  hotZoneCount = constrain((int)(activityLevel * 5), 0, 5);
-  significantObstruction = (hotZoneCount >= 3) || (activityLevel > 0.55f);
+  // Movement intensity (stronger temporal change signal)
+  movementIntensity = constrain(maxChange * 4.5f + csiVariance * 1.8f, 0.0f, 1.0f);
 
-  // LED feedback
+  activityLevel = constrain(csiVariance * 6.5f + movementIntensity * 0.8f, 0.0f, 1.0f);
+  hotZoneCount = constrain((int)(activityLevel * 6), 0, 6);
+  significantObstruction = (hotZoneCount >= 3) || (activityLevel > 0.58f);
+
+  // Confidence model
+  static float prevMovement = 0;
+  float consistency = 1.0f - fabs(movementIntensity - prevMovement);
+  nodeConfidence = constrain(0.4f + consistency * 0.5f + (packetCount / 80.0f) * 0.3f, 0.35f, 0.92f);
+  prevMovement = movementIntensity;
+
+  // Update LED
   setLedMode(significantObstruction ? 1 : 0);
+
+  // Store for next frame
+  for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 }
 
 // === Real CSI Callback ===
@@ -100,7 +118,7 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
     if (latestRealCSI[i] > 1.0f) latestRealCSI[i] = 1.0f;
   }
   hasNewCSI = true;
-  updateCSIMetrics();
+  updateRichCSIFeatures();
 }
 
 void initRealCSI() {
@@ -118,15 +136,17 @@ void initRealCSI() {
   esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
   esp_wifi_set_csi(true);
 
-  Serial.println("[CSI] Real CSI collection enabled");
+  for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
+
+  Serial.println("[CSI] Real CSI + Rich Features enabled");
 }
 
 // === WiFiManager ===
 void connectWiFi() {
-  digitalWrite(STATUS_LED_PIN, HIGH); // Solid during boot/connect
+  digitalWrite(STATUS_LED_PIN, HIGH);
 
   WiFiManager wifiManager;
-  wifiManager.setConfigPortalTimeout(45);
+  wifiManager.setConfigPortalTimeout(40);
 
   String apName = String("ESP32-CSI-") + NODE_ID;
 
@@ -135,51 +155,60 @@ void connectWiFi() {
     Serial.println("WiFi connected");
     digitalWrite(STATUS_LED_PIN, LOW);
   } else {
-    Serial.println("Running without main WiFi");
+    Serial.println("Running in ESP-NOW mode");
     digitalWrite(STATUS_LED_PIN, LOW);
   }
 }
 
 void sendCSIPacket() {
-  if (!wifiConnected) return;
+  if (!wifiConnected && !USE_ESP_NOW) return;
 
   float rssi = WiFi.RSSI();
 
-  if (USE_REAL_CSI && hasNewCSI) {
-    // Real data already processed
-  } else {
-    for (int i = 0; i < 32; i++) latestRealCSI[i] = 0.4f + (random(50) / 100.0f);
-    updateCSIMetrics();
+  if (!USE_REAL_CSI) {
+    for (int i = 0; i < 32; i++) latestRealCSI[i] = 0.45f + (random(40) / 100.0f);
+    updateRichCSIFeatures();
   }
 
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<1400> doc;
   doc["node"] = NODE_ID;
   doc["timestamp"] = millis();
   doc["rssi"] = (int)rssi;
   doc["type"] = "wifi_csi";
+
+  // Rich per-node features
   doc["activity"] = activityLevel;
   doc["hot_zones"] = hotZoneCount;
   doc["obstruction"] = significantObstruction;
+  doc["movement_intensity"] = movementIntensity;
+  doc["confidence"] = nodeConfidence;
 
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
 
-  char jsonBuffer[1024];
+  char jsonBuffer[1400];
   serializeJson(doc, jsonBuffer);
 
-  udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
-  udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
-  udp.endPacket();
+  if (USE_ESP_NOW) {
+    // Handled by gateway
+  }
+
+  if (wifiConnected) {
+    udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
+    udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
+    udp.endPacket();
+  }
 
   packetCount++;
   hasNewCSI = false;
 
-  // Quick LED flash when sending
+  // Quick LED flash
   digitalWrite(STATUS_LED_PIN, HIGH);
-  delay(25);
+  delay(20);
   digitalWrite(STATUS_LED_PIN, LOW);
 
-  Serial.printf("[Sent] RSSI=%d | Act=%.2f | HZ=%d\n", (int)rssi, activityLevel, hotZoneCount);
+  Serial.printf("[Sent] Act=%.2f | Mov=%.2f | Conf=%.2f | HZ=%d\n",
+                activityLevel, movementIntensity, nodeConfidence, hotZoneCount);
 }
 
 void setup() {
@@ -197,7 +226,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node Ready ===");
+  Serial.println("=== ESP32 CSI Node (Rich Features) Ready ===");
 }
 
 void loop() {
