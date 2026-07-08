@@ -1,6 +1,14 @@
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 import time
+import os
+
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
 
 @dataclass
 class NodeState:
@@ -15,22 +23,43 @@ class NodeState:
 
 
 class NodeManager:
-    def __init__(self, room_size: Tuple[float, float] = (10.0, 10.0), grid_resolution: int = 20):
+    def __init__(self, 
+                 room_size: Tuple[float, float] = (12.0, 10.0), 
+                 grid_resolution: int = 20,
+                 nodes_yaml_path: str = "nodes.yaml"):
         self.nodes: Dict[str, NodeState] = {}
-        self.room_size = room_size          # (width, height) in meters
+        self.room_size = room_size
         self.grid_resolution = grid_resolution
         self.probability_field = [[0.0 for _ in range(grid_resolution)] 
                                   for _ in range(grid_resolution)]
+        self.known_positions: Dict[str, Tuple[float, float]] = {}
 
-    def register_or_update(self, node_id: str, data: dict, position: Optional[Tuple[float, float]] = None):
-        """
-        Register a new node or update an existing one.
-        'data' should contain keys like: rssi, activity, hot_zones, obstruction
-        """
+        self._load_positions_from_yaml(nodes_yaml_path)
+
+    def _load_positions_from_yaml(self, path: str):
+        if not HAS_YAML:
+            return
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f) or {}
+            for node_id, info in data.items():
+                if isinstance(info, dict) and "position" in info:
+                    pos = info["position"]
+                    if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                        self.known_positions[node_id] = (float(pos[0]), float(pos[1]))
+            print(f"[NodeManager] Loaded {len(self.known_positions)} node positions from {path}")
+        except Exception as e:
+            print(f"[NodeManager] Failed to load {path}: {e}")
+
+    def register_or_update(self, node_id: str, data: dict):
         now = time.time()
 
         if node_id not in self.nodes:
-            self.nodes[node_id] = NodeState(node_id=node_id, position=position)
+            # Use known position from YAML if available, otherwise None
+            pos = self.known_positions.get(node_id)
+            self.nodes[node_id] = NodeState(node_id=node_id, position=pos)
 
         node = self.nodes[node_id]
         node.last_seen = now
@@ -40,18 +69,9 @@ class NodeManager:
         node.obstruction = data.get("obstruction", node.obstruction)
         node.packet_count += 1
 
-        if position:
-            node.position = position
-
         self._update_probability_field()
 
     def _update_probability_field(self):
-        """
-        Very basic spatial fusion.
-        Each node contributes activity to nearby grid cells.
-        This is a placeholder for proper interpolation later.
-        """
-        # Reset field
         for y in range(self.grid_resolution):
             for x in range(self.grid_resolution):
                 self.probability_field[y][x] = 0.0
@@ -66,33 +86,30 @@ class NodeManager:
             if node.position is None:
                 continue
 
-            # Simple contribution to nearby cells
             gx = int(node.position[0] / cell_w)
             gy = int(node.position[1] / cell_h)
-
-            # Clamp to grid
             gx = max(0, min(self.grid_resolution - 1, gx))
             gy = max(0, min(self.grid_resolution - 1, gy))
 
-            # Add activity as probability mass
-            influence = min(1.0, node.activity * 1.5)
-            self.probability_field[gy][gx] = max(
-                self.probability_field[gy][gx], influence
-            )
+            influence = min(1.0, node.activity * 1.8)
+            self.probability_field[gy][gx] = max(self.probability_field[gy][gx], influence)
 
-            # Light spread to neighbors (very basic)
+            # Light neighbor spread
             for dy in [-1, 0, 1]:
                 for dx in [-1, 0, 1]:
-                    nx, ny = gx + dx, gy + dy
+                    nx = gx + dx
+                    ny = gy + dy
                     if 0 <= nx < self.grid_resolution and 0 <= ny < self.grid_resolution:
+                        spread = influence * (0.7 if (dx == 0 and dy == 0) else 0.4)
                         self.probability_field[ny][nx] = max(
-                            self.probability_field[ny][nx], influence * 0.6
+                            self.probability_field[ny][nx], spread
                         )
 
     def get_room_state(self) -> dict:
         total_activity = sum(n.activity for n in self.nodes.values())
         total_hot_zones = sum(n.hot_zones for n in self.nodes.values())
-        obstruction_prob = min(1.0, sum(1 for n in self.nodes.values() if n.obstruction) / max(1, len(self.nodes)))
+        obstruction_count = sum(1 for n in self.nodes.values() if n.obstruction)
+        obstruction_prob = min(1.0, obstruction_count / max(1, len(self.nodes)))
 
         return {
             "node_count": len(self.nodes),
@@ -111,7 +128,7 @@ class NodeManager:
             }
         }
 
-    def cleanup_stale_nodes(self, timeout_seconds: float = 30.0):
+    def cleanup_stale_nodes(self, timeout_seconds: float = 45.0):
         now = time.time()
         stale = [nid for nid, n in self.nodes.items() if now - n.last_seen > timeout_seconds]
         for nid in stale:
