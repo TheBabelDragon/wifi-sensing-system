@@ -18,8 +18,11 @@ class NodeState:
     activity: float = 0.0
     hot_zones: int = 0
     obstruction: bool = False
-    position: Optional[Tuple[float, float]] = None   # (x, y) in room coordinates
+    movement_intensity: float = 0.0      # Simple proxy for how much things are changing
+    confidence: float = 0.5               # How trustworthy the current reading is (0-1)
+    position: Optional[Tuple[float, float]] = None
     packet_count: int = 0
+    last_activity: float = 0.0            # For calculating movement intensity
 
 
 class NodeManager:
@@ -37,9 +40,7 @@ class NodeManager:
         self._load_positions_from_yaml(nodes_yaml_path)
 
     def _load_positions_from_yaml(self, path: str):
-        if not HAS_YAML:
-            return
-        if not os.path.exists(path):
+        if not HAS_YAML or not os.path.exists(path):
             return
         try:
             with open(path, "r") as f:
@@ -57,17 +58,27 @@ class NodeManager:
         now = time.time()
 
         if node_id not in self.nodes:
-            # Use known position from YAML if available, otherwise None
             pos = self.known_positions.get(node_id)
             self.nodes[node_id] = NodeState(node_id=node_id, position=pos)
 
         node = self.nodes[node_id]
+        prev_activity = node.activity
+
         node.last_seen = now
         node.rssi = data.get("rssi", node.rssi)
         node.activity = data.get("activity", node.activity)
         node.hot_zones = data.get("hot_zones", node.hot_zones)
         node.obstruction = data.get("obstruction", node.obstruction)
         node.packet_count += 1
+
+        # Calculate movement intensity (how much activity changed)
+        activity_change = abs(node.activity - prev_activity)
+        node.movement_intensity = min(1.0, activity_change * 3.0 + node.activity * 0.6)
+
+        # Simple confidence model (higher when we have recent consistent data)
+        time_since_last = now - node.last_seen if node.last_seen else 10
+        recency = max(0.3, 1.0 - min(time_since_last / 30.0, 0.7))
+        node.confidence = min(0.95, recency * 0.7 + (node.packet_count / 50.0) * 0.3)
 
         self._update_probability_field()
 
@@ -91,16 +102,20 @@ class NodeManager:
             gx = max(0, min(self.grid_resolution - 1, gx))
             gy = max(0, min(self.grid_resolution - 1, gy))
 
-            influence = min(1.0, node.activity * 1.8)
+            # Stronger influence from nodes with high movement + confidence
+            influence = node.movement_intensity * node.confidence * 1.6
+            influence = min(1.0, influence)
+
             self.probability_field[gy][gx] = max(self.probability_field[gy][gx], influence)
 
-            # Light neighbor spread
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
+            # Distance-weighted spread to neighbors
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
                     nx = gx + dx
                     ny = gy + dy
                     if 0 <= nx < self.grid_resolution and 0 <= ny < self.grid_resolution:
-                        spread = influence * (0.7 if (dx == 0 and dy == 0) else 0.4)
+                        dist = max(1, abs(dx) + abs(dy))
+                        spread = influence * (1.0 / dist)
                         self.probability_field[ny][nx] = max(
                             self.probability_field[ny][nx], spread
                         )
@@ -122,6 +137,8 @@ class NodeManager:
                     "activity": round(n.activity, 3),
                     "hot_zones": n.hot_zones,
                     "obstruction": n.obstruction,
+                    "movement_intensity": round(n.movement_intensity, 3),
+                    "confidence": round(n.confidence, 3),
                     "position": n.position
                 }
                 for nid, n in self.nodes.items()
