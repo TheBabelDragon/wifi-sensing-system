@@ -53,8 +53,9 @@ from dashboard.server import DashboardServer
 from bridges.swarm_bridge import SwarmBridge
 from visualization.text_viz import render_voxel_field
 
-# New multi-node fusion
+# Multi-node fusion + ML
 from swarm.node_manager import NodeManager
+from ml.pipeline import MLPipeline
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 logger = logging.getLogger("csi-system")
@@ -90,8 +91,9 @@ def run_pipeline():
     dashboard = DashboardServer()
     swarm_bridge = SwarmBridge(redis_url=config.REDIS_URL)
 
-    # === Multi-node Fusion Layer ===
+    # === Multi-node Fusion + ML Layer ===
     node_manager = NodeManager(room_size=(12.0, 10.0), grid_resolution=20)
+    ml_pipeline = MLPipeline()   # ML scaffolding integration
 
     aurora.register_node(f"esp32_{config.ROOM_NAME}_01", {"pos": (2,2), "type": "sensing"})
 
@@ -114,20 +116,16 @@ def run_pipeline():
 
     logger.info("Starting main ingestion loop (real UDP + fallback simulation)...")
 
-    # Main loop using proper ingestor
     for frame_idx in range(1, config.SIMULATION_FRAMES + 1):
         start_time = time.time()
 
         try:
-            # === CORRECT DATA FLOW ===
-            raw = ingest.read_packet()          # Read from UDP (real ESP32 nodes)
+            raw = ingest.read_packet()
 
             if raw is None:
-                # Fallback to simulation only if no real packet arrived
                 from simulation.generator import generate_test_frame
                 raw = generate_test_frame(node_id=f"sim_{config.ROOM_NAME}")
 
-            # Determine operating mode every single frame
             mode = "REAL" if raw and raw.get("timestamp") != "simulated" else "SIM"
 
             parsed = ingest.parse_packet(raw)
@@ -148,7 +146,7 @@ def run_pipeline():
                 "obstruction": parsed.get("obstruction", False)
             })
 
-            # === Normal WiFi CSI Processing Pipeline (existing) ===
+            # === Normal processing pipeline ===
             calibrated = calib.calibrate(parsed)
             voxels = fusion.fuse(calibrated)
             tracks = tracker.update(voxels)
@@ -165,10 +163,16 @@ def run_pipeline():
             if frame_idx % 2 == 0 or len(preds) >= 2:
                 swarm_bridge.send_full_context(preds, evs, behaviors, memory.room_profile)
 
-            # === Publish fused RoomState to aurora-swarm-btc ===
+            # === Fused RoomState + ML Inference ===
             if time.time() - last_fusion_log > 8:
                 room_state = node_manager.get_room_state()
                 swarm_bridge.send_room_state(room_state)
+
+                # Run ML pipeline on fused state
+                ml_result = ml_pipeline.process_room_state(room_state)
+                logger.info(f"[ML] Prediction: {ml_result.get('prediction')} | "
+                            f"Confidence: {ml_result.get('confidence')}")
+
                 last_fusion_log = time.time()
 
             if time.time() - last_heartbeat > 8:
@@ -179,7 +183,6 @@ def run_pipeline():
                 logger.info(f"[Pipeline] {mode} | Frame {frame_idx} | Tracks: {len(preds)} | Events: {len(evs)}")
                 last_status_log = time.time()
 
-            # Debug logging for per-frame details
             processing_time = time.time() - start_time
             logger.debug(
                 f"Frame {frame_idx:04d} | Mode: {mode} | "
@@ -207,8 +210,6 @@ def run_pipeline():
             })
 
             render_voxel_field(voxels, preds)
-
-            # Optional: cleanup stale nodes
             node_manager.cleanup_stale_nodes(timeout_seconds=45.0)
 
         except Exception as e:
