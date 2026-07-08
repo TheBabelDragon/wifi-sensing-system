@@ -12,7 +12,7 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - Always-on ESP-NOW + Rich Features
+// ESP32 CSI Node - RGB IO2 (Lonely Binary Gold Edition)
 // ============================================================
 
 #if HAS_DISPLAY
@@ -34,8 +34,8 @@ const char* NODE_ID           = "esp32_node_01";
 const uint32_t SEND_INTERVAL_MS = 450;
 const int STATUS_LED_PIN      = 2;
 
-// RGB LED
-const int RGB_LED_PIN = 4;
+// RGB LED on Lonely Binary Gold Edition
+const int RGB_LED_PIN = 2;   // Confirmed: RGB IO2
 const int NUM_PIXELS  = 1;
 Adafruit_NeoPixel rgbLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -78,7 +78,7 @@ void updateRGBStatus() {
   } else if (activityLevel > 0.4) {
     setRGB(255, 200, 0);
   } else if (!wifiConnected && espnowReady) {
-    setRGB(0, 150, 255);     // Cyan = ESP-NOW only
+    setRGB(0, 150, 255);
   } else if (!wifiConnected) {
     setRGB(0, 0, 255);
   } else if (nodeConfidence > 0.75) {
@@ -88,7 +88,7 @@ void updateRGBStatus() {
   }
 }
 
-// === ESP-NOW (Always initialized when enabled) ===
+// === ESP-NOW ===
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {}
 
 void initESPNow() {
@@ -228,7 +228,7 @@ void initRealCSI() {
   esp_wifi_set_csi(true);
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
-  Serial.println("[CSI] Rich 4-Band Features enabled");
+  Serial.println("[CSI] Rich 4-Band + RGB IO2 ready");
 }
 
 // === WiFi + ESP-NOW ===
@@ -258,12 +258,10 @@ void sendCSIPacket() {
     updateRichCSIFeatures();
   }
 
-  // Always try ESP-NOW if ready
   if (USE_ESP_NOW && espnowReady) {
     sendViaESPNow();
   }
 
-  // Also send via UDP if WiFi is connected
   if (wifiConnected) {
     StaticJsonDocument<1600> doc;
     doc["node"] = NODE_ID;
@@ -312,7 +310,6 @@ void setup() {
   rgbLed.setBrightness(80);
   setRGB(255, 0, 255);
 
-  // Always initialize ESP-NOW early if enabled
   if (USE_ESP_NOW) {
     initESPNow();
   }
@@ -325,7 +322,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node Ready (ESP-NOW Always Active) ===");
+  Serial.println("=== ESP32 CSI Node (RGB IO2) Ready ===");
 }
 
 void loop() {
