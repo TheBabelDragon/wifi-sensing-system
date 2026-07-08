@@ -8,7 +8,7 @@ class SwarmBridge:
     """
     Resilient bridge for sending context and heartbeats to aurora-swarm-btc.
 
-    Includes basic reconnection handling.
+    Now also supports publishing fused multi-node RoomState.
     """
 
     def __init__(self, redis_url: str = None):
@@ -52,6 +52,26 @@ class SwarmBridge:
         }
         self._safe_call(self.adapter.publish_to_swarm, "sensing:context", payload)
         self._safe_call(self.adapter.update_swarm_state, "sensing:latest_context", payload)
+        self.send_heartbeat()
+
+    def send_room_state(self, room_state: dict):
+        """
+        Publish fused multi-node room state from NodeManager.
+        This is the new richer payload for aurora-swarm-btc.
+        """
+        payload = {
+            "type": "ROOM_STATE_UPDATE",
+            "timestamp": time.time(),
+            "source": "wifi-csi-sensing",
+            "node_count": room_state.get("node_count", 0),
+            "total_activity": room_state.get("total_activity", 0.0),
+            "total_hot_zones": room_state.get("total_hot_zones", 0),
+            "obstruction_probability": room_state.get("obstruction_probability", 0.0),
+            "probability_field": room_state.get("probability_field", []),
+            "nodes": room_state.get("nodes", {})
+        }
+        self._safe_call(self.adapter.publish_to_swarm, "sensing:room_state", payload)
+        self._safe_call(self.adapter.update_swarm_state, "sensing:latest_room_state", payload)
         self.send_heartbeat()
 
     def send_occupancy_event(self, room: str, count: int, behavior: str = None):
