@@ -3,13 +3,14 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
+#include <Adafruit_NeoPixel.h>
 #include <cmath>
 
 #include <esp_wifi.h>
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - Unified Rich Features (CYD + Standard)
+// ESP32 CSI Node - RGB LED Status (WROOM-32UE)
 // ============================================================
 
 #if HAS_DISPLAY
@@ -30,6 +31,12 @@ const uint16_t TARGET_PORT    = 4210;
 const char* NODE_ID           = "esp32_node_01";
 const uint32_t SEND_INTERVAL_MS = 450;
 const int STATUS_LED_PIN      = 2;
+
+// RGB LED (WS2812/NeoPixel) - change pin if needed
+const int RGB_LED_PIN = 4;     // Common on many WROOM boards
+const int NUM_PIXELS  = 1;
+
+Adafruit_NeoPixel rgbLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 const bool USE_REAL_CSI = true;
 
@@ -52,24 +59,29 @@ float activityLevel = 0;
 bool significantObstruction = false;
 int hotZoneCount = 0;
 
-// === LED ===
-unsigned long lastLedUpdate = 0;
-int ledState = LOW;
-int ledMode = 0;
+// === RGB LED Control ===
+void setRGB(uint8_t r, uint8_t g, uint8_t b) {
+  rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
+  rgbLed.show();
+}
 
-void updateLED() {
-  unsigned long now = millis();
-  int interval = (ledMode == 1) ? 130 : 520;
-  if (now - lastLedUpdate > interval) {
-    lastLedUpdate = now;
-    ledState = !ledState;
-    digitalWrite(STATUS_LED_PIN, ledState);
+void updateRGBStatus() {
+  if (significantObstruction) {
+    setRGB(255, 0, 0);           // Red = Obstruction / High activity
+  } else if (movementIntensity > 0.6) {
+    setRGB(255, 100, 0);         // Orange = Strong movement
+  } else if (activityLevel > 0.4) {
+    setRGB(255, 200, 0);         // Yellow = Medium activity
+  } else if (!wifiConnected) {
+    setRGB(0, 0, 255);           // Blue = ESP-NOW only / no WiFi
+  } else if (nodeConfidence > 0.75) {
+    setRGB(0, 255, 200);         // Cyan = High confidence
+  } else {
+    setRGB(0, 180, 0);           // Green = Normal operation
   }
 }
 
-void setLedMode(int mode) { ledMode = mode; }
-
-// === Unified Rich CSI Features (4-band) ===
+// === Rich CSI Features (4-band) ===
 void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++) {
     int start = b * 8;
@@ -122,7 +134,7 @@ void updateRichCSIFeatures() {
   nodeConfidence = constrain(0.4f + consistency * 0.5f + (packetCount / 80.0f) * 0.3f, 0.35f, 0.92f);
   prevMovement = movementIntensity;
 
-  setLedMode(significantObstruction ? 1 : 0);
+  updateRGBStatus();
 
   for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 }
@@ -160,12 +172,12 @@ void initRealCSI() {
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
 
-  Serial.println("[CSI] Rich 4-Band Features enabled");
+  Serial.println("[CSI] Rich 4-Band + RGB Status enabled");
 }
 
 // === WiFiManager ===
 void connectWiFi() {
-  digitalWrite(STATUS_LED_PIN, HIGH);
+  setRGB(0, 0, 255); // Blue while connecting
 
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(40);
@@ -175,10 +187,10 @@ void connectWiFi() {
   if (wifiManager.autoConnect(apName.c_str())) {
     wifiConnected = true;
     Serial.println("WiFi connected");
-    digitalWrite(STATUS_LED_PIN, LOW);
+    setRGB(0, 180, 0); // Green = connected
   } else {
     Serial.println("Running without main WiFi");
-    digitalWrite(STATUS_LED_PIN, LOW);
+    setRGB(0, 0, 255); // Blue = ESP-NOW mode
   }
 }
 
@@ -220,9 +232,10 @@ void sendCSIPacket() {
   packetCount++;
   hasNewCSI = false;
 
-  digitalWrite(STATUS_LED_PIN, HIGH);
-  delay(20);
-  digitalWrite(STATUS_LED_PIN, LOW);
+  // Quick white flash when sending
+  setRGB(255, 255, 255);
+  delay(30);
+  updateRGBStatus();
 
   Serial.printf("[Sent] Act=%.2f | Mov=%.2f | Conf=%.2f | HZ=%d\n",
                 activityLevel, movementIntensity, nodeConfidence, hotZoneCount);
@@ -235,6 +248,10 @@ void setup() {
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
 
+  rgbLed.begin();
+  rgbLed.setBrightness(80);
+  setRGB(255, 0, 255); // Purple during boot
+
   connectWiFi();
 
   if (USE_REAL_CSI) {
@@ -243,13 +260,11 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node (Rich Features) Ready ===");
+  Serial.println("=== ESP32 CSI Node (RGB Status) Ready ===");
 }
 
 void loop() {
   unsigned long now = millis();
-
-  updateLED();
 
   if (now - lastSendTime >= SEND_INTERVAL_MS) {
     sendCSIPacket();
