@@ -3,6 +3,8 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 #include <Adafruit_NeoPixel.h>
 #include <cmath>
 
@@ -10,7 +12,8 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - RGB LED Status (WROOM-32UE)
+// ESP32 CSI Node - Full ESP-NOW Safe Fallback
+// Works on esp32-standard, esp32-cyd, and esp32-s3
 // ============================================================
 
 #if HAS_DISPLAY
@@ -32,13 +35,14 @@ const char* NODE_ID           = "esp32_node_01";
 const uint32_t SEND_INTERVAL_MS = 450;
 const int STATUS_LED_PIN      = 2;
 
-// RGB LED (WS2812/NeoPixel) - change pin if needed
-const int RGB_LED_PIN = 4;     // Common on many WROOM boards
+// RGB LED
+const int RGB_LED_PIN = 4;
 const int NUM_PIXELS  = 1;
-
 Adafruit_NeoPixel rgbLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
-const bool USE_REAL_CSI = true;
+// ESP-NOW
+const bool USE_ESP_NOW = true;
+const uint8_t BROADCAST_ADDRESS[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 float latestRealCSI[32];
 float prevCSI[32];
@@ -52,6 +56,7 @@ float nodeConfidence  = 0.6;
 WiFiUDP udp;
 unsigned long lastSendTime = 0;
 bool wifiConnected = false;
+bool espnowReady = false;
 int packetCount = 0;
 
 float csiVariance = 0;
@@ -59,7 +64,7 @@ float activityLevel = 0;
 bool significantObstruction = false;
 int hotZoneCount = 0;
 
-// === RGB LED Control ===
+// === RGB LED ===
 void setRGB(uint8_t r, uint8_t g, uint8_t b) {
   rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
   rgbLed.show();
@@ -67,21 +72,76 @@ void setRGB(uint8_t r, uint8_t g, uint8_t b) {
 
 void updateRGBStatus() {
   if (significantObstruction) {
-    setRGB(255, 0, 0);           // Red = Obstruction / High activity
+    setRGB(255, 0, 0);
   } else if (movementIntensity > 0.6) {
-    setRGB(255, 100, 0);         // Orange = Strong movement
+    setRGB(255, 100, 0);
   } else if (activityLevel > 0.4) {
-    setRGB(255, 200, 0);         // Yellow = Medium activity
+    setRGB(255, 200, 0);
+  } else if (!wifiConnected && espnowReady) {
+    setRGB(0, 150, 255);     // Cyan = ESP-NOW only mode
   } else if (!wifiConnected) {
-    setRGB(0, 0, 255);           // Blue = ESP-NOW only / no WiFi
+    setRGB(0, 0, 255);       // Blue = connecting / no network
   } else if (nodeConfidence > 0.75) {
-    setRGB(0, 255, 200);         // Cyan = High confidence
+    setRGB(0, 255, 200);
   } else {
-    setRGB(0, 180, 0);           // Green = Normal operation
+    setRGB(0, 180, 0);
   }
 }
 
-// === Rich CSI Features (4-band) ===
+// === ESP-NOW ===
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  // Optional callback
+}
+
+void initESPNow() {
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESP-NOW] Init failed");
+    return;
+  }
+
+  esp_now_register_send_cb(onDataSent);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, BROADCAST_ADDRESS, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("[ESP-NOW] Failed to add broadcast peer");
+    return;
+  }
+
+  espnowReady = true;
+  Serial.println("[ESP-NOW] Ready (broadcast mode)");
+}
+
+void sendViaESPNow() {
+  if (!espnowReady) return;
+
+  StaticJsonDocument<1600> doc;
+  doc["node"] = NODE_ID;
+  doc["timestamp"] = millis();
+  doc["rssi"] = (int)WiFi.RSSI();
+  doc["type"] = "wifi_csi";
+  doc["activity"] = activityLevel;
+  doc["hot_zones"] = hotZoneCount;
+  doc["obstruction"] = significantObstruction;
+  doc["movement_intensity"] = movementIntensity;
+  doc["confidence"] = nodeConfidence;
+
+  JsonArray bandMov = doc.createNestedArray("band_movement");
+  for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
+
+  JsonArray csiArr = doc.createNestedArray("csi");
+  for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
+
+  char jsonBuffer[1600];
+  serializeJson(doc, jsonBuffer);
+
+  esp_now_send(BROADCAST_ADDRESS, (uint8_t*)jsonBuffer, strlen(jsonBuffer));
+}
+
+// === Rich CSI Features ===
 void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++) {
     int start = b * 8;
@@ -172,31 +232,32 @@ void initRealCSI() {
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
 
-  Serial.println("[CSI] Rich 4-Band + RGB Status enabled");
+  Serial.println("[CSI] Rich 4-Band Features + ESP-NOW Fallback enabled");
 }
 
-// === WiFiManager ===
+// === WiFiManager with ESP-NOW Fallback ===
 void connectWiFi() {
   setRGB(0, 0, 255); // Blue while connecting
 
   WiFiManager wifiManager;
-  wifiManager.setConfigPortalTimeout(40);
+  wifiManager.setConfigPortalTimeout(35);
 
   String apName = String("ESP32-CSI-") + NODE_ID;
 
   if (wifiManager.autoConnect(apName.c_str())) {
     wifiConnected = true;
     Serial.println("WiFi connected");
-    setRGB(0, 180, 0); // Green = connected
+    setRGB(0, 180, 0);
   } else {
-    Serial.println("Running without main WiFi");
-    setRGB(0, 0, 255); // Blue = ESP-NOW mode
+    Serial.println("No WiFi - falling back to ESP-NOW only mode");
+    if (USE_ESP_NOW) {
+      initESPNow();
+    }
+    setRGB(0, 150, 255); // Cyan = ESP-NOW fallback active
   }
 }
 
 void sendCSIPacket() {
-  if (!wifiConnected) return;
-
   float rssi = WiFi.RSSI();
 
   if (!USE_REAL_CSI) {
@@ -204,37 +265,44 @@ void sendCSIPacket() {
     updateRichCSIFeatures();
   }
 
-  StaticJsonDocument<1600> doc;
-  doc["node"] = NODE_ID;
-  doc["timestamp"] = millis();
-  doc["rssi"] = (int)rssi;
-  doc["type"] = "wifi_csi";
+  // Send via ESP-NOW if available (safe fallback)
+  if (USE_ESP_NOW && espnowReady) {
+    sendViaESPNow();
+  }
 
-  doc["activity"] = activityLevel;
-  doc["hot_zones"] = hotZoneCount;
-  doc["obstruction"] = significantObstruction;
-  doc["movement_intensity"] = movementIntensity;
-  doc["confidence"] = nodeConfidence;
+  // Also try UDP if WiFi is connected
+  if (wifiConnected) {
+    StaticJsonDocument<1600> doc;
+    doc["node"] = NODE_ID;
+    doc["timestamp"] = millis();
+    doc["rssi"] = (int)rssi;
+    doc["type"] = "wifi_csi";
+    doc["activity"] = activityLevel;
+    doc["hot_zones"] = hotZoneCount;
+    doc["obstruction"] = significantObstruction;
+    doc["movement_intensity"] = movementIntensity;
+    doc["confidence"] = nodeConfidence;
 
-  JsonArray bandMov = doc.createNestedArray("band_movement");
-  for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
+    JsonArray bandMov = doc.createNestedArray("band_movement");
+    for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
 
-  JsonArray csiArr = doc.createNestedArray("csi");
-  for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
+    JsonArray csiArr = doc.createNestedArray("csi");
+    for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
 
-  char jsonBuffer[1600];
-  serializeJson(doc, jsonBuffer);
+    char jsonBuffer[1600];
+    serializeJson(doc, jsonBuffer);
 
-  udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
-  udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
-  udp.endPacket();
+    udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
+    udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
+    udp.endPacket();
+  }
 
   packetCount++;
   hasNewCSI = false;
 
-  // Quick white flash when sending
+  // Quick white flash
   setRGB(255, 255, 255);
-  delay(30);
+  delay(25);
   updateRGBStatus();
 
   Serial.printf("[Sent] Act=%.2f | Mov=%.2f | Conf=%.2f | HZ=%d\n",
@@ -260,7 +328,7 @@ void setup() {
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node (RGB Status) Ready ===");
+  Serial.println("=== ESP32 CSI Node (ESP-NOW Safe Fallback) Ready ===");
 }
 
 void loop() {
