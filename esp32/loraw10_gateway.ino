@@ -8,10 +8,10 @@
 #include <Adafruit_SSD1306.h>
 
 // ============================================================
-// LoraW10 Gateway (with OLED) - Enhanced Display
+// LoraW10 Gateway (OLED Auto-Detect Version)
 // ============================================================
 
-// === PIN DEFINITIONS ===
+// === PIN DEFINITIONS (Change these if your board is different) ===
 #define LORA_NSS    18
 #define LORA_RST    23
 #define LORA_DIO0   26
@@ -23,13 +23,12 @@
 #define GPS_TX      15
 #define GPS_BAUD    9600
 
+// OLED I2C pins (most common on W10-style boards)
 #define OLED_SDA    21
 #define OLED_SCL    22
-#define OLED_ADDR   0x3C
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
-// === LORA ===
 #define LORA_FREQUENCY 915E6
 #define LORA_SYNC_WORD 0x12
 
@@ -45,7 +44,7 @@ TinyGPSPlus gps;
 HardwareSerial GPS_Serial(1);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// === STATE ===
+// State variables
 int packetsReceived = 0;
 String lastNode = "None";
 float lastActivity = 0;
@@ -57,66 +56,60 @@ int displayPage = 0;
 void onDataReceived(const uint8_t * mac, const uint8_t * data, int len) {
   packetsReceived++;
 
-  // Parse basic info from JSON (simple string search for demo)
-  String payload = String((char*)data);
-  if (payload.indexOf("node") != -1) {
-    int start = payload.indexOf("node") + 7;
-    int end = payload.indexOf('"', start);
-    if (end > start) lastNode = payload.substring(start, end);
+  String payload((char*)data);
+  int nodeStart = payload.indexOf("\"node\":\"");
+  if (nodeStart != -1) {
+    nodeStart += 8;
+    int nodeEnd = payload.indexOf('"', nodeStart);
+    if (nodeEnd > nodeStart) lastNode = payload.substring(nodeStart, nodeEnd);
   }
 
   Serial.printf("[ESP-NOW] Packet #%d received\n", packetsReceived);
 
-  // Forward via LoRa
   LoRa.beginPacket();
   LoRa.write(data, len);
   LoRa.endPacket();
 
-  // Forward via UDP
   if (WiFi.status() == WL_CONNECTED) {
     udp.beginPacket(UDP_TARGET_IP, UDP_TARGET_PORT);
     udp.write(data, len);
     udp.endPacket();
   }
 
-  // Update display with latest node info
   lastDisplayUpdate = millis();
-  displayPage = 1; // Show node info
+  displayPage = 1;
 }
 
-// === Display Update ===
+// === Display ===
 void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
   if (displayPage == 0) {
-    // Main status page
     display.setCursor(0, 0);
     display.println("LoraW10 Gateway");
     display.setCursor(0, 16);
     display.printf("Packets: %d", packetsReceived);
     display.setCursor(0, 28);
     if (gps.location.isValid()) {
-      display.printf("GPS: %.4f,%.4f", gps.location.lat(), gps.location.lng());
+      display.printf("GPS OK (%d sats)", gps.satellites.value());
     } else {
-      display.println("GPS: No Fix");
+      display.println("GPS: Searching...");
     }
     display.setCursor(0, 40);
-    display.printf("Last Node: %s", lastNode.c_str());
+    display.printf("Last: %s", lastNode.c_str());
 
   } else if (displayPage == 1) {
-    // Last node info
     display.setCursor(0, 0);
     display.println("Last Node:");
     display.setCursor(0, 16);
-    display.printf("%s", lastNode.c_str());
+    display.print(lastNode);
     display.setCursor(0, 32);
     display.printf("Activity: %.2f", lastActivity);
     display.setCursor(0, 44);
     display.printf("HotZones: %d", lastHotZones);
 
-    // Auto return to main page after 4 seconds
     if (millis() - lastDisplayUpdate > 4000) {
       displayPage = 0;
     }
@@ -137,7 +130,7 @@ void sendGatewayHeartbeat() {
     LoRa.print(payload);
     LoRa.endPacket();
 
-    Serial.printf("[LoRa] Heartbeat sent\n");
+    Serial.println("[LoRa] Heartbeat sent");
   }
 }
 
@@ -149,26 +142,35 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
     delay(300);
     Serial.print(".");
   }
+  Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
     udp.begin(4211);
   } else {
-    Serial.println("\nRunning in LoRa-only mode");
+    Serial.println("Running in LoRa-only mode");
   }
 
   // GPS
   GPS_Serial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
 
-  // OLED
+  // OLED with auto address detection
   Wire.begin(OLED_SDA, OLED_SCL);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("OLED init failed");
-  } else {
+  bool oledOK = false;
+
+  if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    oledOK = true;
+    Serial.println("OLED found at 0x3C");
+  } else if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
+    oledOK = true;
+    Serial.println("OLED found at 0x3D");
+  }
+
+  if (oledOK) {
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
@@ -177,6 +179,9 @@ void setup() {
     display.setCursor(0, 20);
     display.println("Booting...");
     display.display();
+    delay(800);
+  } else {
+    Serial.println("No OLED detected!");
   }
 
   // LoRa
@@ -201,18 +206,15 @@ void setup() {
 }
 
 void loop() {
-  // GPS parsing
   while (GPS_Serial.available()) {
     gps.encode(GPS_Serial.read());
   }
 
-  // Update display periodically
-  if (millis() - lastDisplayUpdate > 1500) {
+  if (millis() - lastDisplayUpdate > 1200) {
     updateDisplay();
     lastDisplayUpdate = millis();
   }
 
-  // Send heartbeat every 30 seconds
   static unsigned long lastHB = 0;
   if (millis() - lastHB > 30000) {
     sendGatewayHeartbeat();
