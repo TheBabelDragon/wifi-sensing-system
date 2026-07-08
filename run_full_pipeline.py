@@ -165,6 +165,12 @@ def run_pipeline():
             if frame_idx % 2 == 0 or len(preds) >= 2:
                 swarm_bridge.send_full_context(preds, evs, behaviors, memory.room_profile)
 
+            # === Publish fused RoomState to aurora-swarm-btc ===
+            if time.time() - last_fusion_log > 8:
+                room_state = node_manager.get_room_state()
+                swarm_bridge.send_room_state(room_state)
+                last_fusion_log = time.time()
+
             if time.time() - last_heartbeat > 8:
                 swarm_bridge.send_heartbeat()
                 last_heartbeat = time.time()
@@ -172,14 +178,6 @@ def run_pipeline():
             if time.time() - last_status_log > 15:
                 logger.info(f"[Pipeline] {mode} | Frame {frame_idx} | Tracks: {len(preds)} | Events: {len(evs)}")
                 last_status_log = time.time()
-
-            # Periodically log fused room state
-            if time.time() - last_fusion_log > 10:
-                room_state = node_manager.get_room_state()
-                logger.info(f"[Fusion] Nodes: {room_state['node_count']} | "
-                            f"Activity: {room_state['total_activity']} | "
-                            f"Obstruction Prob: {room_state['obstruction_probability']}")
-                last_fusion_log = time.time()
 
             # Debug logging for per-frame details
             processing_time = time.time() - start_time
