@@ -9,7 +9,7 @@
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - Full Band-Aware + Improved Heatmap (CYD)
+// ESP32 CSI Node - Unified Rich Features (CYD + Standard)
 // ============================================================
 
 #if HAS_DISPLAY
@@ -27,12 +27,11 @@
 // === CONFIG ===
 const char* TARGET_SERVER_IP  = "192.168.1.100";
 const uint16_t TARGET_PORT    = 4210;
-const char* NODE_ID           = "esp32_cyd_01";
+const char* NODE_ID           = "esp32_node_01";
 const uint32_t SEND_INTERVAL_MS = 450;
 const int STATUS_LED_PIN      = 2;
 
 const bool USE_REAL_CSI = true;
-const bool USE_ESP_NOW    = true;
 
 float latestRealCSI[32];
 float prevCSI[32];
@@ -53,11 +52,6 @@ float activityLevel = 0;
 bool significantObstruction = false;
 int hotZoneCount = 0;
 
-// Heatmap grid (20x16)
-#define GRID_W 20
-#define GRID_H 16
-float heatMap[GRID_W * GRID_H];
-
 // === LED ===
 unsigned long lastLedUpdate = 0;
 int ledState = LOW;
@@ -75,8 +69,8 @@ void updateLED() {
 
 void setLedMode(int mode) { ledMode = mode; }
 
-// === Band-Aware CSI + Heatmap Update ===
-void updateBandAwareCSIFeatures() {
+// === Unified Rich CSI Features (4-band) ===
+void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++) {
     int start = b * 8;
     float mean = 0;
@@ -130,18 +124,6 @@ void updateBandAwareCSIFeatures() {
 
   setLedMode(significantObstruction ? 1 : 0);
 
-  // === Update Heatmap using band-aware data ===
-  float excitationBase = movementIntensity * 1.3f + activityLevel * 0.9f;
-
-  for (int i = 0; i < GRID_W * GRID_H; i++) {
-    // Use strongest band to slightly bias excitation
-    float bandBoost = strongestBand * 0.6f;
-    float excitation = excitationBase + bandBoost;
-
-    heatMap[i] = heatMap[i] * 0.78f + excitation * 0.22f;
-    heatMap[i] = constrain(heatMap[i], 0.0f, 2.4f);
-  }
-
   for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 }
 
@@ -158,7 +140,7 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
     if (latestRealCSI[i] > 1.0f) latestRealCSI[i] = 1.0f;
   }
   hasNewCSI = true;
-  updateBandAwareCSIFeatures();
+  updateRichCSIFeatures();
 }
 
 void initRealCSI() {
@@ -177,85 +159,9 @@ void initRealCSI() {
   esp_wifi_set_csi(true);
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
-  for (int i = 0; i < GRID_W * GRID_H; i++) heatMap[i] = 0.02f;
 
-  Serial.println("[CSI] Real CSI + Band-Aware Heatmap enabled");
+  Serial.println("[CSI] Rich 4-Band Features enabled");
 }
-
-// === Heatmap Display ===
-#if HAS_DISPLAY
-
-uint16_t heatColor(float v, float bandBoost) {
-  v = constrain(v, 0.0f, 2.4f);
-  // Slight color shift based on dominant band (high freq = warmer)
-  if (bandBoost > 0.6f) {
-    // High frequency dominant → warmer tones
-    if (v < 0.4f)  return tft.color565(10, 0, (int)(v * 120));
-    if (v < 0.9f)  return tft.color565((int)(v * 220), 80, 20);
-    return tft.color565(255, (int)((v - 0.9f) * 180), 0);
-  } else {
-    // Normal
-    if (v < 0.35f) return tft.color565(0, 0, (int)(v * 110));
-    if (v < 0.75f) return tft.color565(0, (int)(v * 160), 90);
-    if (v < 1.2f)  return tft.color565((int)(v * 240), 140, 15);
-    return tft.color565(255, (int)((v - 1.2f) * 140), 0);
-  }
-}
-
-void drawHeatMap() {
-  tft.fillScreen(TFT_BLACK);
-
-  const int cellW = 16;
-  const int cellH = 15;
-
-  float strongestBandVal = 0;
-  for (int b = 0; b < 4; b++) {
-    if (bandMovement[b] > strongestBandVal) strongestBandVal = bandMovement[b];
-  }
-
-  for (int y = 0; y < GRID_H; y++) {
-    for (int x = 0; x < GRID_W; x++) {
-      int idx = y * GRID_W + x;
-      float val = heatMap[idx];
-      uint16_t col = heatColor(val, strongestBandVal);
-      tft.fillRect(x * cellW, y * cellH, cellW-1, cellH-1, col);
-    }
-  }
-
-  tft.fillRect(0, 0, 320, 22, TFT_BLACK);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(5, 5);
-  tft.printf("%s  Act:%.2f  Mov:%.2f  Conf:%.2f", NODE_ID, activityLevel, movementIntensity, nodeConfidence);
-
-  if (significantObstruction) {
-    tft.setTextColor(TFT_RED);
-    tft.setCursor(5, 225);
-    tft.print("OBSTRUCTION");
-  } else {
-    tft.setTextColor(TFT_GREEN);
-    tft.setCursor(5, 225);
-    tft.print("CLEAR");
-  }
-}
-
-void initDisplay() {
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
-
-  tft.init();
-  tft.setRotation(1);
-
-  for (int i = 0; i < GRID_W * GRID_H; i++) heatMap[i] = 0.02f;
-
-  drawHeatMap();
-}
-
-void updateDisplay(float rssi) {
-  drawHeatMap();
-}
-
-#endif
 
 // === WiFiManager ===
 void connectWiFi() {
@@ -271,19 +177,19 @@ void connectWiFi() {
     Serial.println("WiFi connected");
     digitalWrite(STATUS_LED_PIN, LOW);
   } else {
-    Serial.println("Running in ESP-NOW mode");
+    Serial.println("Running without main WiFi");
     digitalWrite(STATUS_LED_PIN, LOW);
   }
 }
 
 void sendCSIPacket() {
-  if (!wifiConnected && !USE_ESP_NOW) return;
+  if (!wifiConnected) return;
 
   float rssi = WiFi.RSSI();
 
   if (!USE_REAL_CSI) {
     for (int i = 0; i < 32; i++) latestRealCSI[i] = 0.45f + (random(40) / 100.0f);
-    updateBandAwareCSIFeatures();
+    updateRichCSIFeatures();
   }
 
   StaticJsonDocument<1600> doc;
@@ -307,15 +213,9 @@ void sendCSIPacket() {
   char jsonBuffer[1600];
   serializeJson(doc, jsonBuffer);
 
-  if (USE_ESP_NOW) {
-    // Handled by gateway
-  }
-
-  if (wifiConnected) {
-    udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
-    udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
-    udp.endPacket();
-  }
+  udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
+  udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
+  udp.endPacket();
 
   packetCount++;
   hasNewCSI = false;
@@ -341,13 +241,9 @@ void setup() {
     initRealCSI();
   }
 
-  #if HAS_DISPLAY
-    initDisplay();
-  #endif
-
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node (Band-Aware + Heatmap) Ready ===");
+  Serial.println("=== ESP32 CSI Node (Rich Features) Ready ===");
 }
 
 void loop() {
@@ -355,18 +251,10 @@ void loop() {
 
   updateLED();
 
-  #if HAS_DISPLAY
-    static unsigned long lastDisplay = 0;
-    if (now - lastDisplay > 120) {
-      drawHeatMap();
-      lastDisplay = now;
-    }
-  #endif
-
   if (now - lastSendTime >= SEND_INTERVAL_MS) {
     sendCSIPacket();
     lastSendTime = now;
   }
 
-  delay(8);
+  delay(10);
 }
