@@ -4,15 +4,14 @@
 #include <LoRa.h>
 #include <TinyGPS++.h>
 #include <HardwareSerial.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <U8g2lib.h>
+#include <Wire.h>
 
 // ============================================================
-// LoraW10 Gateway - Maximum Debug OLED Version
-// Change the pins below if your board is different
+// LoraW10 Gateway - U8g2 Version (More Reliable OLED)
 // ============================================================
 
-// === EDIT THESE PINS IF NEEDED ===
+// === PIN DEFINITIONS (Change if your board differs) ===
 #define LORA_NSS     18
 #define LORA_RST     23
 #define LORA_DIO0    26
@@ -24,14 +23,9 @@
 #define GPS_TX       15
 #define GPS_BAUD   9600
 
-// Try these OLED pins first (most common on W10 boards)
+// OLED I2C pins - most common on W10 boards
 #define OLED_SDA     21
 #define OLED_SCL     22
-#define OLED_RESET   -1
-#define OLED_ADDR    0x3C
-
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
 
 #define LORA_FREQUENCY 915E6
 #define LORA_SYNC_WORD 0x12
@@ -46,15 +40,17 @@ const uint16_t UDP_TARGET_PORT = 4210;
 WiFiUDP udp;
 TinyGPSPlus gps;
 HardwareSerial GPS_Serial(1);
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// U8g2 OLED (more reliable on these boards)
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
 int packetsReceived = 0;
 String lastNode = "None";
 
 void onDataReceived(const uint8_t * mac, const uint8_t * data, int len) {
   packetsReceived++;
-  String payload((char*)data);
 
+  String payload((char*)data);
   int start = payload.indexOf("node");
   if (start != -1) {
     start += 7;
@@ -74,30 +70,28 @@ void onDataReceived(const uint8_t * mac, const uint8_t * data, int len) {
 }
 
 void updateDisplay() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("LoraW10 Gateway");
-  display.setCursor(0, 16);
-  display.printf("Packets: %d", packetsReceived);
-  display.setCursor(0, 28);
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(0, 10);
+  u8g2.print("LoraW10 Gateway");
+  u8g2.setCursor(0, 25);
+  u8g2.printf("Packets: %d", packetsReceived);
+  u8g2.setCursor(0, 40);
   if (gps.location.isValid()) {
-    display.printf("GPS: %.4f", gps.location.lat());
+    u8g2.printf("GPS: %.4f", gps.location.lat());
   } else {
-    display.println("GPS: No Fix");
+    u8g2.print("GPS: No Fix");
   }
-  display.setCursor(0, 40);
-  display.printf("Last: %s", lastNode.c_str());
-  display.display();
+  u8g2.setCursor(0, 55);
+  u8g2.printf("Last: %s", lastNode.c_str());
+  u8g2.sendBuffer();
 }
 
 void setup() {
-  // Start Serial as early as possible
   Serial.begin(115200);
-  delay(500);
+  delay(400);
   Serial.println();
-  Serial.println("=== LoraW10 Gateway Starting ===");
+  Serial.println("=== LoraW10 Gateway (U8g2) Starting ===");
 
   // WiFi
   WiFi.mode(WIFI_STA);
@@ -118,60 +112,42 @@ void setup() {
 
   // GPS
   GPS_Serial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
-  Serial.println("GPS serial started");
+  Serial.println("GPS started");
 
-  // OLED - Maximum debug version
-  Serial.printf("Trying OLED on SDA=%d, SCL=%d, Addr=0x%02X\n", OLED_SDA, OLED_SCL, OLED_ADDR);
-
+  // OLED using U8g2 (more reliable)
   Wire.begin(OLED_SDA, OLED_SCL);
-  delay(150);
+  delay(100);
 
-  bool oledSuccess = false;
+  u8g2.begin();
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(0, 10);
+  u8g2.print("LoraW10 Gateway");
+  u8g2.setCursor(0, 25);
+  u8g2.print("Booting...");
+  u8g2.sendBuffer();
 
-  if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    oledSuccess = true;
-    Serial.println("SUCCESS: OLED initialized at 0x3C");
-  } else {
-    Serial.println("Failed at 0x3C, trying 0x3D...");
-    if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
-      oledSuccess = true;
-      Serial.println("SUCCESS: OLED initialized at 0x3D");
-    } else {
-      Serial.println("FAILED: No OLED detected on either address!");
-    }
-  }
-
-  if (oledSuccess) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("LoraW10 Gateway");
-    display.setCursor(0, 20);
-    display.println("OLED Working!");
-    display.display();
-    delay(800);
-  }
+  Serial.println("OLED initialized (U8g2)");
 
   // LoRa
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
   LoRa.setPins(LORA_NSS, LORA_RST, LORA_DIO0);
   if (!LoRa.begin(LORA_FREQUENCY)) {
-    Serial.println("LoRa init FAILED");
+    Serial.println("LoRa FAILED");
     while (1);
   }
   LoRa.setSyncWord(LORA_SYNC_WORD);
-  Serial.println("LoRa initialized successfully");
+  Serial.println("LoRa initialized");
 
   // ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW init FAILED");
+    Serial.println("ESP-NOW FAILED");
     while (1);
   }
   esp_now_register_recv_cb(onDataReceived);
   Serial.println("ESP-NOW Ready");
 
-  Serial.println("=== LoraW10 Gateway Fully Started ===");
+  Serial.println("=== LoraW10 Gateway Ready ===");
 }
 
 void loop() {
@@ -181,15 +157,12 @@ void loop() {
 
   static unsigned long lastDisplay = 0;
   if (millis() - lastDisplay > 1000) {
-    if (display.width() > 0) {   // Only update if display initialized
-      updateDisplay();
-    }
+    updateDisplay();
     lastDisplay = millis();
   }
 
   static unsigned long lastHB = 0;
   if (millis() - lastHB > 30000) {
-    // sendGatewayHeartbeat(); // Uncomment if you want LoRa heartbeats
     lastHB = millis();
   }
 
