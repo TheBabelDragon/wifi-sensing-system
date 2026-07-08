@@ -8,10 +8,11 @@
 #include <Adafruit_SSD1306.h>
 
 // ============================================================
-// LoraW10 Gateway - Robust OLED Version
+// LoraW10 Gateway - Maximum Debug OLED Version
+// Change the pins below if your board is different
 // ============================================================
 
-// === CHANGE THESE IF YOUR BOARD IS DIFFERENT ===
+// === EDIT THESE PINS IF NEEDED ===
 #define LORA_NSS     18
 #define LORA_RST     23
 #define LORA_DIO0    26
@@ -23,11 +24,11 @@
 #define GPS_TX       15
 #define GPS_BAUD   9600
 
-// OLED pins (most common on W10 boards)
+// Try these OLED pins first (most common on W10 boards)
 #define OLED_SDA     21
 #define OLED_SCL     22
-#define OLED_RESET   -1      // Set to a GPIO if your board has OLED RST pin
-#define OLED_ADDR    0x3C    // Try 0x3D if this doesn't work
+#define OLED_RESET   -1
+#define OLED_ADDR    0x3C
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -49,16 +50,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 int packetsReceived = 0;
 String lastNode = "None";
-float lastActivity = 0;
-int lastHotZones = 0;
-unsigned long lastDisplayUpdate = 0;
-int displayPage = 0;
 
-// === ESP-NOW ===
 void onDataReceived(const uint8_t * mac, const uint8_t * data, int len) {
   packetsReceived++;
-
   String payload((char*)data);
+
   int start = payload.indexOf("node");
   if (start != -1) {
     start += 7;
@@ -75,62 +71,33 @@ void onDataReceived(const uint8_t * mac, const uint8_t * data, int len) {
     udp.write(data, len);
     udp.endPacket();
   }
-
-  lastDisplayUpdate = millis();
-  displayPage = 1;
 }
 
 void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-
-  if (displayPage == 0) {
-    display.setCursor(0, 0);
-    display.println("LoraW10 Gateway");
-    display.setCursor(0, 16);
-    display.printf("Packets: %d", packetsReceived);
-    display.setCursor(0, 28);
-    if (gps.location.isValid()) {
-      display.printf("GPS: %.4f", gps.location.lat());
-    } else {
-      display.println("GPS: No Fix");
-    }
-    display.setCursor(0, 40);
-    display.printf("Last: %s", lastNode.c_str());
-
-  } else if (displayPage == 1) {
-    display.setCursor(0, 0);
-    display.println("Last Node");
-    display.setCursor(0, 16);
-    display.print(lastNode);
-    display.setCursor(0, 32);
-    display.printf("Act: %.2f  HZ: %d", lastActivity, lastHotZones);
-
-    if (millis() - lastDisplayUpdate > 4000) displayPage = 0;
+  display.setCursor(0, 0);
+  display.println("LoraW10 Gateway");
+  display.setCursor(0, 16);
+  display.printf("Packets: %d", packetsReceived);
+  display.setCursor(0, 28);
+  if (gps.location.isValid()) {
+    display.printf("GPS: %.4f", gps.location.lat());
+  } else {
+    display.println("GPS: No Fix");
   }
-
+  display.setCursor(0, 40);
+  display.printf("Last: %s", lastNode.c_str());
   display.display();
 }
 
-void sendGatewayHeartbeat() {
-  if (gps.location.isValid()) {
-    char payload[128];
-    snprintf(payload, sizeof(payload),
-             "{\"gw\":\"LoraW10\",\"lat\":%.6f,\"lon\":%.6f}",
-             gps.location.lat(), gps.location.lng());
-
-    LoRa.beginPacket();
-    LoRa.print(payload);
-    LoRa.endPacket();
-  }
-}
-
 void setup() {
+  // Start Serial as early as possible
   Serial.begin(115200);
-  delay(300);
-
-  Serial.println("=== LoraW10 Gateway Booting ===");
+  delay(500);
+  Serial.println();
+  Serial.println("=== LoraW10 Gateway Starting ===");
 
   // WiFi
   WiFi.mode(WIFI_STA);
@@ -146,71 +113,83 @@ void setup() {
     Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
     udp.begin(4211);
   } else {
-    Serial.println("Running without WiFi");
+    Serial.println("Running in LoRa-only mode");
   }
 
   // GPS
   GPS_Serial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
+  Serial.println("GPS serial started");
 
-  // OLED - More robust initialization
+  // OLED - Maximum debug version
+  Serial.printf("Trying OLED on SDA=%d, SCL=%d, Addr=0x%02X\n", OLED_SDA, OLED_SCL, OLED_ADDR);
+
   Wire.begin(OLED_SDA, OLED_SCL);
-  delay(100);
+  delay(150);
 
-  bool displayOK = false;
+  bool oledSuccess = false;
+
   if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    displayOK = true;
-    Serial.println("OLED OK at 0x3C");
-  } else if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
-    displayOK = true;
-    Serial.println("OLED OK at 0x3D");
+    oledSuccess = true;
+    Serial.println("SUCCESS: OLED initialized at 0x3C");
+  } else {
+    Serial.println("Failed at 0x3C, trying 0x3D...");
+    if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
+      oledSuccess = true;
+      Serial.println("SUCCESS: OLED initialized at 0x3D");
+    } else {
+      Serial.println("FAILED: No OLED detected on either address!");
+    }
   }
 
-  if (displayOK) {
+  if (oledSuccess) {
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
     display.println("LoraW10 Gateway");
     display.setCursor(0, 20);
-    display.println("Starting...");
+    display.println("OLED Working!");
     display.display();
-    delay(600);
-  } else {
-    Serial.println("!!! OLED NOT FOUND !!!");
+    delay(800);
   }
 
   // LoRa
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
   LoRa.setPins(LORA_NSS, LORA_RST, LORA_DIO0);
   if (!LoRa.begin(LORA_FREQUENCY)) {
-    Serial.println("LoRa FAILED");
+    Serial.println("LoRa init FAILED");
     while (1);
   }
   LoRa.setSyncWord(LORA_SYNC_WORD);
-  Serial.println("LoRa initialized");
+  Serial.println("LoRa initialized successfully");
 
   // ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW FAILED");
+    Serial.println("ESP-NOW init FAILED");
     while (1);
   }
   esp_now_register_recv_cb(onDataReceived);
   Serial.println("ESP-NOW Ready");
 
-  Serial.println("=== LoraW10 Gateway Ready ===");
+  Serial.println("=== LoraW10 Gateway Fully Started ===");
 }
 
 void loop() {
-  while (GPS_Serial.available()) gps.encode(GPS_Serial.read());
+  while (GPS_Serial.available()) {
+    gps.encode(GPS_Serial.read());
+  }
 
-  if (millis() - lastDisplayUpdate > 1000) {
-    updateDisplay();
-    lastDisplayUpdate = millis();
+  static unsigned long lastDisplay = 0;
+  if (millis() - lastDisplay > 1000) {
+    if (display.width() > 0) {   // Only update if display initialized
+      updateDisplay();
+    }
+    lastDisplay = millis();
   }
 
   static unsigned long lastHB = 0;
   if (millis() - lastHB > 30000) {
-    sendGatewayHeartbeat();
+    // sendGatewayHeartbeat(); // Uncomment if you want LoRa heartbeats
     lastHB = millis();
   }
 
