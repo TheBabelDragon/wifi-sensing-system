@@ -1,35 +1,55 @@
-# ESP32 CSI Nodes
+# ESP32 CSI nodes (closed-loop)
 
-UDP **port 4210** → Echo Grid / wifi-sensing host.
+| Direction | Port | Role |
+|-----------|------|------|
+| out | **4210** | CSI JSON broadcast → Echo Grid |
+| in | **4211** | `echo_cmd` from Echo Grid |
 
-## If you hit Guru Meditation / reboot loop
+## Boards
 
-Use the **simple** Arduino sketch first:
+| Flag | Board |
+|------|--------|
+| `--standard` | ESP32 DevKit |
+| `--cyd` | Cheap Yellow Display |
+| `--s3` | ESP32-S3 |
 
-1. Open `esp32_csi_udp_sender.ino` in Arduino IDE
-2. Libraries: ArduinoJson, WiFiManager
-3. Board: ESP32 Dev Module
-4. Port: `/dev/ttyUSB0`
-5. **Tools → Erase Flash → All Flash Contents**
-6. Upload
-
-Or PlatformIO (fixed boot order):
+## Flash one CYD
 
 ```bash
+cd wifi-sensing-system/esp32
 git pull
-pio run -e esp32-standard -t erase
-pio run -e esp32-standard -t upload --upload-port /dev/ttyUSB0
-pio device monitor -b 115200 --port /dev/ttyUSB0
+chmod +x flash.sh
+
+./flash.sh --cyd -p /dev/ttyUSB0 -e --monitor
 ```
 
-You should see `Setup complete` and `[UDP] ...:4210` — **not** continuous reboots.
+Display shows node id, rate, boost, CSI bars.
 
-## Portal
+## Flash additional nodes (unique ids)
 
-Join `ESP32-CSI-*` → `http://192.168.4.1` → set home Wi‑Fi + **Echo Grid host IP**.
+```bash
+# second CYD
+./flash.sh --cyd --node esp32_cyd_02 -p /dev/ttyUSB0 -e
+
+# second plain ESP32
+./flash.sh --standard --node esp32_node_02 -p /dev/ttyUSB1 -e
+
+# third
+./flash.sh --standard --node esp32_node_03 -p /dev/ttyACM0 -e
+```
+
+Each node needs its own `NODE_ID` so Echo Grid tracks them separately.
+
+## First boot
+
+1. Join `ESP32-CSI-<node>` if portal opens  
+2. Set home Wi‑Fi  
+3. Same LAN as PC running Echo Grid  
 
 ## Echo Grid
 
 ```bash
 python visualization/dashboard.py --csi
 ```
+
+ESP serial should show `[CMD] boost` / `quiet` when the grid is live.

@@ -8,21 +8,34 @@
 #include <cmath>
 
 // ============================================================
-// ESP32 CSI closed-loop with Echo Grid
+// ESP32 CSI closed-loop (standard + CYD)
 //   CSI out  → broadcast :4210
-//   commands ← UDP :4211  (echo_cmd)
+//   commands ← UDP :4211  (echo_cmd from Echo Grid)
 // ============================================================
+
+#ifndef HAS_DISPLAY
+#define HAS_DISPLAY 0
+#endif
+
+#ifndef NODE_ID_STR
+#define NODE_ID_STR "esp32_node_01"
+#endif
+
+#if HAS_DISPLAY
+  #include <TFT_eSPI.h>
+  TFT_eSPI tft = TFT_eSPI();
+#endif
 
 const uint16_t CSI_PORT         = 4210;
 const uint16_t CMD_PORT         = 4211;
-const char* NODE_ID             = "esp32_node_01";
+const char* NODE_ID             = NODE_ID_STR;
 const int STATUS_LED_PIN        = 2;
 const bool USE_REAL_CSI         = true;
 
-uint32_t sendIntervalMs         = 450;   // adaptive via Echo commands
+uint32_t sendIntervalMs         = 450;
 uint32_t minIntervalMs          = 120;
 uint32_t maxIntervalMs          = 1200;
-float boostLevel                = 0.0f;  // 0..1 from Echo
+float boostLevel                = 0.0f;
 
 float latestRealCSI[32];
 float prevCSI[32];
@@ -39,13 +52,66 @@ float csiVariance = 0;
 WiFiUDP udpCsi;
 WiFiUDP udpCmd;
 unsigned long lastSendTime = 0;
+unsigned long lastUiTime = 0;
 bool wifiConnected = false;
 int packetCount = 0;
 int cmdCount = 0;
 
 void statusLed(bool on) {
+#if !HAS_DISPLAY
   digitalWrite(STATUS_LED_PIN, on ? HIGH : LOW);
+#else
+  (void)on;
+#endif
 }
+
+#if HAS_DISPLAY
+void initDisplay() {
+  tft.init();
+  tft.setRotation(1); // landscape on CYD
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(8, 8);
+  tft.println("Echo CSI Node");
+  tft.setTextSize(1);
+  tft.setCursor(8, 32);
+  tft.print("id: ");
+  tft.println(NODE_ID);
+  tft.setCursor(8, 48);
+  tft.println("CSI:4210  CMD:4211");
+}
+
+void updateDisplay() {
+  tft.fillRect(0, 70, 320, 170, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setCursor(8, 72);
+  tft.print("WiFi: ");
+  tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  tft.print(wifiConnected ? "OK  " : "--  ");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.print("RSSI ");
+  tft.print(wifiConnected ? (int)WiFi.RSSI() : 0);
+  tft.println(" dBm");
+
+  tft.setCursor(8, 90);
+  tft.printf("rate %u ms   boost %.2f\n", sendIntervalMs, boostLevel);
+  tft.setCursor(8, 106);
+  tft.printf("act %.2f  mov %.2f  cmds %d\n", activityLevel, movementIntensity, cmdCount);
+  tft.setCursor(8, 122);
+  tft.printf("pkts %d\n", packetCount);
+
+  // CSI bars
+  for (int i = 0; i < 32; i++) {
+    int h = (int)(latestRealCSI[i] * 50);
+    if (h < 1) h = 1;
+    if (h > 55) h = 55;
+    uint16_t color = boostLevel > 0.3f ? TFT_ORANGE : TFT_CYAN;
+    tft.fillRect(8 + i * 9, 200 - h, 7, h, color);
+  }
+}
+#endif
 
 void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++) {
@@ -73,7 +139,6 @@ void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++)
     if (bandMovement[b] > strongest) strongest = bandMovement[b];
 
-  // boostLevel from Echo tightens motion sensitivity slightly
   float gain = 1.0f + 0.8f * boostLevel;
   movementIntensity = constrain((strongest * 4.8f + csiVariance * 1.6f) * gain, 0.0f, 1.0f);
   activityLevel = constrain((csiVariance * 6.2f + movementIntensity * 0.9f) * gain, 0.0f, 1.0f);
@@ -135,31 +200,25 @@ void connectWiFi() {
 void handleEchoCommand(const char* json, size_t len) {
   StaticJsonDocument<512> doc;
   if (deserializeJson(doc, json, len)) return;
-
   const char* type = doc["type"] | "";
   if (strcmp(type, "echo_cmd") != 0) return;
-
   const char* cmd = doc["cmd"] | "";
   cmdCount++;
 
   if (strcmp(cmd, "set_rate") == 0) {
     uint32_t ms = doc["interval_ms"] | sendIntervalMs;
     sendIntervalMs = constrain(ms, minIntervalMs, maxIntervalMs);
-    Serial.printf("[CMD] set_rate %u ms\n", sendIntervalMs);
+    Serial.printf("[CMD] set_rate %u\n", sendIntervalMs);
   } else if (strcmp(cmd, "boost") == 0) {
     boostLevel = constrain((float)(doc["level"] | 0.7), 0.0f, 1.0f);
-    // faster samples when boosting
-    sendIntervalMs = (uint32_t)(450.0f - 280.0f * boostLevel);
-    sendIntervalMs = constrain(sendIntervalMs, minIntervalMs, maxIntervalMs);
-    Serial.printf("[CMD] boost level=%.2f rate=%u\n", boostLevel, sendIntervalMs);
+    sendIntervalMs = constrain((uint32_t)(450.0f - 280.0f * boostLevel), minIntervalMs, maxIntervalMs);
+    Serial.printf("[CMD] boost %.2f rate=%u\n", boostLevel, sendIntervalMs);
   } else if (strcmp(cmd, "quiet") == 0) {
     boostLevel = 0.0f;
     sendIntervalMs = 900;
     Serial.println("[CMD] quiet");
   } else if (strcmp(cmd, "ping") == 0) {
     Serial.println("[CMD] ping");
-  } else {
-    Serial.printf("[CMD] unknown %s\n", cmd);
   }
 }
 
@@ -178,7 +237,6 @@ void pollCommands() {
 
 void sendCSIPacket() {
   if (!wifiConnected) return;
-
   float rssi = WiFi.RSSI();
 
   if (!hasNewCSI) {
@@ -203,7 +261,6 @@ void sendCSIPacket() {
 
   JsonArray bandMov = doc.createNestedArray("band_movement");
   for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
-
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
 
@@ -223,30 +280,39 @@ void sendCSIPacket() {
 
   packetCount++;
   hasNewCSI = false;
-
-  Serial.printf("[UDP] CSI :%u rate=%u boost=%.2f act=%.2f cmds=%d\n",
-                CSI_PORT, sendIntervalMs, boostLevel, activityLevel, cmdCount);
+  Serial.printf("[UDP] %s :%u rate=%u boost=%.2f cmds=%d\n",
+                NODE_ID, CSI_PORT, sendIntervalMs, boostLevel, cmdCount);
 }
 
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("=== ESP32 CSI closed-loop (4210 out / 4211 cmd) ===");
+  Serial.println("=== ESP32 CSI closed-loop ===");
+  Serial.printf("NODE_ID=%s  CSI:%u  CMD:%u  DISPLAY=%d\n",
+                NODE_ID, CSI_PORT, CMD_PORT, HAS_DISPLAY);
 
+#if HAS_DISPLAY
+  initDisplay();
+#else
   pinMode(STATUS_LED_PIN, OUTPUT);
   statusLed(false);
+#endif
 
   WiFi.mode(WIFI_STA);
   delay(50);
   connectWiFi();
 
   if (USE_REAL_CSI && !initRealCSI()) {
-    Serial.println("[CSI] soft CSI fallback");
+    Serial.println("[CSI] soft fallback");
   }
 
-  udpCsi.begin(4212);   // local bind for send socket
+  udpCsi.begin(4212);
   udpCmd.begin(CMD_PORT);
-  Serial.printf("Listening for Echo cmds on :%u\n", CMD_PORT);
+  Serial.printf("Listening Echo cmds :%u\n", CMD_PORT);
+
+#if HAS_DISPLAY
+  updateDisplay();
+#endif
 }
 
 void loop() {
@@ -256,5 +322,12 @@ void loop() {
     sendCSIPacket();
     lastSendTime = millis();
   }
+
+#if HAS_DISPLAY
+  if (millis() - lastUiTime > 400) {
+    updateDisplay();
+    lastUiTime = millis();
+  }
+#endif
   delay(5);
 }
