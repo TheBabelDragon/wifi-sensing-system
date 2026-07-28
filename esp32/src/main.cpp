@@ -7,12 +7,6 @@
 #include <esp_wifi_types.h>
 #include <cmath>
 
-// ============================================================
-// ESP32 CSI closed-loop (standard + CYD)
-//   CSI out  → broadcast :4210
-//   commands ← UDP :4211  (echo_cmd from Echo Grid)
-// ============================================================
-
 #ifndef HAS_DISPLAY
 #define HAS_DISPLAY 0
 #endif
@@ -24,6 +18,9 @@
 #if HAS_DISPLAY
   #include <TFT_eSPI.h>
   TFT_eSPI tft = TFT_eSPI();
+  #ifndef TFT_BL
+    #define TFT_BL 21
+  #endif
 #endif
 
 const uint16_t CSI_PORT         = 4210;
@@ -57,6 +54,164 @@ bool wifiConnected = false;
 int packetCount = 0;
 int cmdCount = 0;
 
+// ---------- colors (RGB565) ----------
+#if HAS_DISPLAY
+const uint16_t COL_BG     = 0x0841; // near-black blue
+const uint16_t COL_PANEL  = 0x1082;
+const uint16_t COL_CYAN   = 0x07FF;
+const uint16_t COL_MAG    = 0xF81F;
+const uint16_t COL_ORANGE = 0xFD20;
+const uint16_t COL_GREEN  = 0x07E0;
+const uint16_t COL_RED    = 0xF800;
+const uint16_t COL_YELLOW = 0xFFE0;
+const uint16_t COL_WHITE  = 0xFFFF;
+const uint16_t COL_DIM    = 0x8410;
+const uint16_t COL_BAR_BG = 0x2104;
+
+void drawRoundPanel(int x, int y, int w, int h, uint16_t fill) {
+  tft.fillRoundRect(x, y, w, h, 6, fill);
+  tft.drawRoundRect(x, y, w, h, 6, COL_DIM);
+}
+
+void initDisplay() {
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);   // CRITICAL — without this CYD stays black
+
+  tft.init();
+  tft.setRotation(1);           // 320 x 240 landscape
+  tft.fillScreen(COL_BG);
+
+  // Header bar
+  tft.fillRect(0, 0, 320, 28, COL_PANEL);
+  tft.setTextColor(COL_CYAN, COL_PANEL);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("ECHO CSI", 8, 8, 2);
+  tft.setTextColor(COL_WHITE, COL_PANEL);
+  tft.drawString(NODE_ID, 100, 10, 1);
+  tft.setTextColor(COL_DIM, COL_PANEL);
+  tft.drawString("4210/4211", 250, 10, 1);
+
+  // Static panels
+  drawRoundPanel(6, 34, 200, 52, COL_PANEL);   // motion
+  drawRoundPanel(212, 34, 102, 52, COL_PANEL);  // boost
+  drawRoundPanel(6, 92, 308, 36, COL_PANEL);    // status chips
+  drawRoundPanel(6, 134, 308, 100, COL_PANEL);  // spectrum
+
+  tft.setTextColor(COL_DIM, COL_PANEL);
+  tft.drawString("MOTION", 14, 40, 1);
+  tft.drawString("BOOST", 220, 40, 1);
+  tft.drawString("SPECTRUM", 14, 140, 1);
+}
+
+void drawMotionBar(float v) {
+  int x = 14, y = 56, w = 184, h = 18;
+  tft.fillRoundRect(x, y, w, h, 4, COL_BAR_BG);
+  int fill = (int)(v * (w - 2));
+  if (fill < 0) fill = 0;
+  if (fill > w - 2) fill = w - 2;
+  uint16_t c = v > 0.7f ? COL_ORANGE : (v > 0.35f ? COL_CYAN : COL_GREEN);
+  if (fill > 0) tft.fillRoundRect(x + 1, y + 1, fill, h - 2, 3, c);
+  tft.setTextColor(COL_WHITE, COL_PANEL);
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%.2f", v);
+  tft.drawString(buf, 160, 40, 1);
+}
+
+void drawBoostGauge(float b) {
+  // vertical fill meter
+  int x = 248, y = 54, w = 30, h = 24;
+  tft.fillRect(x, y, w, h, COL_BAR_BG);
+  int fh = (int)(b * (h - 2));
+  if (fh > 0) {
+    tft.fillRect(x + 1, y + (h - 1 - fh), w - 2, fh, b > 0.3f ? COL_ORANGE : COL_DIM);
+  }
+  tft.setTextColor(COL_WHITE, COL_PANEL);
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%d%%", (int)(b * 100));
+  tft.drawString(buf, 220, 58, 1);
+}
+
+void drawStatusChips() {
+  tft.fillRect(10, 98, 300, 24, COL_PANEL);
+
+  // WiFi chip
+  uint16_t wc = wifiConnected ? COL_GREEN : COL_RED;
+  tft.fillRoundRect(12, 98, 70, 22, 4, wc);
+  tft.setTextColor(COL_BG, wc);
+  tft.drawString(wifiConnected ? "WiFi OK" : "WiFi --", 18, 104, 1);
+
+  // rate chip
+  tft.fillRoundRect(90, 98, 90, 22, 4, COL_BAR_BG);
+  tft.setTextColor(COL_CYAN, COL_BAR_BG);
+  char rb[24];
+  snprintf(rb, sizeof(rb), "%ums", sendIntervalMs);
+  tft.drawString(rb, 100, 104, 1);
+
+  // cmds chip
+  tft.fillRoundRect(188, 98, 60, 22, 4, COL_BAR_BG);
+  tft.setTextColor(COL_MAG, COL_BAR_BG);
+  char cb[16];
+  snprintf(cb, sizeof(cb), "c%d", cmdCount);
+  tft.drawString(cb, 198, 104, 1);
+
+  // rssi
+  tft.fillRoundRect(254, 98, 54, 22, 4, COL_BAR_BG);
+  tft.setTextColor(COL_YELLOW, COL_BAR_BG);
+  char sb[16];
+  snprintf(sb, sizeof(sb), "%d", wifiConnected ? (int)WiFi.RSSI() : 0);
+  tft.drawString(sb, 262, 104, 1);
+}
+
+void drawSpectrum() {
+  const int baseY = 226;
+  const int maxH = 72;
+  const int barW = 8;
+  const int gap = 1;
+  const int startX = 14;
+
+  // clear spectrum area only
+  tft.fillRect(12, 152, 296, maxH + 6, COL_PANEL);
+
+  for (int i = 0; i < 32; i++) {
+    float v = latestRealCSI[i];
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    int h = (int)(v * maxH);
+    if (h < 2) h = 2;
+    int x = startX + i * (barW + gap);
+
+    // color gradient by amplitude + boost tint
+    uint16_t c;
+    if (boostLevel > 0.4f) {
+      c = v > 0.6f ? COL_ORANGE : COL_MAG;
+    } else if (v > 0.65f) {
+      c = COL_CYAN;
+    } else if (v > 0.35f) {
+      c = 0x5DFF; // soft blue
+    } else {
+      c = 0x3A2F;
+    }
+    tft.fillRect(x, baseY - h, barW, h, c);
+    // tip highlight
+    tft.drawFastHLine(x, baseY - h, barW, COL_WHITE);
+  }
+}
+
+void updateDisplay() {
+  drawMotionBar(activityLevel > movementIntensity ? activityLevel : movementIntensity);
+  drawBoostGauge(boostLevel);
+  drawStatusChips();
+  drawSpectrum();
+
+  // footer packet counter
+  tft.setTextColor(COL_DIM, COL_BG);
+  tft.fillRect(0, 232, 320, 8, COL_BG);
+  char fb[40];
+  snprintf(fb, sizeof(fb), "pkts %d  act %.2f  mov %.2f", packetCount, activityLevel, movementIntensity);
+  tft.drawString(fb, 8, 232, 1);
+}
+#endif
+
 void statusLed(bool on) {
 #if !HAS_DISPLAY
   digitalWrite(STATUS_LED_PIN, on ? HIGH : LOW);
@@ -64,54 +219,6 @@ void statusLed(bool on) {
   (void)on;
 #endif
 }
-
-#if HAS_DISPLAY
-void initDisplay() {
-  tft.init();
-  tft.setRotation(1); // landscape on CYD
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(8, 8);
-  tft.println("Echo CSI Node");
-  tft.setTextSize(1);
-  tft.setCursor(8, 32);
-  tft.print("id: ");
-  tft.println(NODE_ID);
-  tft.setCursor(8, 48);
-  tft.println("CSI:4210  CMD:4211");
-}
-
-void updateDisplay() {
-  tft.fillRect(0, 70, 320, 170, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.setCursor(8, 72);
-  tft.print("WiFi: ");
-  tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  tft.print(wifiConnected ? "OK  " : "--  ");
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.print("RSSI ");
-  tft.print(wifiConnected ? (int)WiFi.RSSI() : 0);
-  tft.println(" dBm");
-
-  tft.setCursor(8, 90);
-  tft.printf("rate %u ms   boost %.2f\n", sendIntervalMs, boostLevel);
-  tft.setCursor(8, 106);
-  tft.printf("act %.2f  mov %.2f  cmds %d\n", activityLevel, movementIntensity, cmdCount);
-  tft.setCursor(8, 122);
-  tft.printf("pkts %d\n", packetCount);
-
-  // CSI bars
-  for (int i = 0; i < 32; i++) {
-    int h = (int)(latestRealCSI[i] * 50);
-    if (h < 1) h = 1;
-    if (h > 55) h = 55;
-    uint16_t color = boostLevel > 0.3f ? TFT_ORANGE : TFT_CYAN;
-    tft.fillRect(8 + i * 9, 200 - h, 7, h, color);
-  }
-}
-#endif
 
 void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++) {
@@ -324,7 +431,7 @@ void loop() {
   }
 
 #if HAS_DISPLAY
-  if (millis() - lastUiTime > 400) {
+  if (millis() - lastUiTime > 250) {
     updateDisplay();
     lastUiTime = millis();
   }
