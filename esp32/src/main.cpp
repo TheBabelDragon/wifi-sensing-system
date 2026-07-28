@@ -3,23 +3,26 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
-#include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_wifi_types.h>
 #include <cmath>
 
 // ============================================================
-// ESP32 CSI → LAN broadcast :4210 (Echo Grid / wifi-sensing)
-// No host IP config required once on the same Wi-Fi.
+// ESP32 CSI closed-loop with Echo Grid
+//   CSI out  → broadcast :4210
+//   commands ← UDP :4211  (echo_cmd)
 // ============================================================
 
-const uint16_t TARGET_PORT      = 4210;
+const uint16_t CSI_PORT         = 4210;
+const uint16_t CMD_PORT         = 4211;
 const char* NODE_ID             = "esp32_node_01";
-const uint32_t SEND_INTERVAL_MS = 450;
 const int STATUS_LED_PIN        = 2;
+const bool USE_REAL_CSI         = true;
 
-const bool USE_ESP_NOW  = false;  // off by default — was spamming errors
-const bool USE_REAL_CSI = true;
+uint32_t sendIntervalMs         = 450;   // adaptive via Echo commands
+uint32_t minIntervalMs          = 120;
+uint32_t maxIntervalMs          = 1200;
+float boostLevel                = 0.0f;  // 0..1 from Echo
 
 float latestRealCSI[32];
 float prevCSI[32];
@@ -33,10 +36,12 @@ int hotZoneCount = 0;
 bool significantObstruction = false;
 float csiVariance = 0;
 
-WiFiUDP udp;
+WiFiUDP udpCsi;
+WiFiUDP udpCmd;
 unsigned long lastSendTime = 0;
 bool wifiConnected = false;
 int packetCount = 0;
+int cmdCount = 0;
 
 void statusLed(bool on) {
   digitalWrite(STATUS_LED_PIN, on ? HIGH : LOW);
@@ -68,8 +73,10 @@ void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++)
     if (bandMovement[b] > strongest) strongest = bandMovement[b];
 
-  movementIntensity = constrain(strongest * 4.8f + csiVariance * 1.6f, 0.0f, 1.0f);
-  activityLevel = constrain(csiVariance * 6.2f + movementIntensity * 0.9f, 0.0f, 1.0f);
+  // boostLevel from Echo tightens motion sensitivity slightly
+  float gain = 1.0f + 0.8f * boostLevel;
+  movementIntensity = constrain((strongest * 4.8f + csiVariance * 1.6f) * gain, 0.0f, 1.0f);
+  activityLevel = constrain((csiVariance * 6.2f + movementIntensity * 0.9f) * gain, 0.0f, 1.0f);
   hotZoneCount = constrain((int)(activityLevel * 6), 0, 6);
   significantObstruction = (hotZoneCount >= 3) || (activityLevel > 0.58f);
   nodeConfidence = constrain(0.4f + activityLevel * 0.5f, 0.35f, 0.92f);
@@ -93,18 +100,15 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
 
 bool initRealCSI() {
   if (esp_wifi_set_promiscuous(true) != ESP_OK) return false;
-
   wifi_csi_config_t cfg = {};
   cfg.lltf_en = true;
   cfg.htltf_en = true;
   cfg.stbc_htltf2_en = true;
   cfg.ltf_merge_en = true;
   cfg.manu_scale = false;
-
   if (esp_wifi_set_csi_config(&cfg) != ESP_OK) return false;
   if (esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL) != ESP_OK) return false;
   if (esp_wifi_set_csi(true) != ESP_OK) return false;
-
   for (int i = 0; i < 32; i++) {
     latestRealCSI[i] = 0.3f;
     prevCSI[i] = 0.3f;
@@ -117,7 +121,6 @@ void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(180);
-
   String apName = String("ESP32-CSI-") + NODE_ID;
   if (wifiManager.autoConnect(apName.c_str())) {
     wifiConnected = true;
@@ -126,6 +129,50 @@ void connectWiFi() {
     Serial.println(WiFi.localIP());
   } else {
     Serial.println("[WiFi] failed");
+  }
+}
+
+void handleEchoCommand(const char* json, size_t len) {
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc, json, len)) return;
+
+  const char* type = doc["type"] | "";
+  if (strcmp(type, "echo_cmd") != 0) return;
+
+  const char* cmd = doc["cmd"] | "";
+  cmdCount++;
+
+  if (strcmp(cmd, "set_rate") == 0) {
+    uint32_t ms = doc["interval_ms"] | sendIntervalMs;
+    sendIntervalMs = constrain(ms, minIntervalMs, maxIntervalMs);
+    Serial.printf("[CMD] set_rate %u ms\n", sendIntervalMs);
+  } else if (strcmp(cmd, "boost") == 0) {
+    boostLevel = constrain((float)(doc["level"] | 0.7), 0.0f, 1.0f);
+    // faster samples when boosting
+    sendIntervalMs = (uint32_t)(450.0f - 280.0f * boostLevel);
+    sendIntervalMs = constrain(sendIntervalMs, minIntervalMs, maxIntervalMs);
+    Serial.printf("[CMD] boost level=%.2f rate=%u\n", boostLevel, sendIntervalMs);
+  } else if (strcmp(cmd, "quiet") == 0) {
+    boostLevel = 0.0f;
+    sendIntervalMs = 900;
+    Serial.println("[CMD] quiet");
+  } else if (strcmp(cmd, "ping") == 0) {
+    Serial.println("[CMD] ping");
+  } else {
+    Serial.printf("[CMD] unknown %s\n", cmd);
+  }
+}
+
+void pollCommands() {
+  int packetSize = udpCmd.parsePacket();
+  while (packetSize > 0) {
+    char buf[512];
+    int n = udpCmd.read(buf, sizeof(buf) - 1);
+    if (n > 0) {
+      buf[n] = 0;
+      handleEchoCommand(buf, n);
+    }
+    packetSize = udpCmd.parsePacket();
   }
 }
 
@@ -150,6 +197,9 @@ void sendCSIPacket() {
   doc["obstruction"] = significantObstruction;
   doc["movement_intensity"] = movementIntensity;
   doc["confidence"] = nodeConfidence;
+  doc["interval_ms"] = sendIntervalMs;
+  doc["boost"] = boostLevel;
+  doc["cmd_count"] = cmdCount;
 
   JsonArray bandMov = doc.createNestedArray("band_movement");
   for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
@@ -160,53 +210,51 @@ void sendCSIPacket() {
   char buf[1600];
   size_t n = serializeJson(doc, buf);
 
-  // Broadcast — any host on the LAN listening :4210 gets it (Echo Grid)
   IPAddress bcast = WiFi.localIP();
   bcast[3] = 255;
-
-  bool ok = false;
-  if (udp.beginPacket(bcast, TARGET_PORT)) {
-    udp.write((uint8_t*)buf, n);
-    ok = udp.endPacket();
+  if (udpCsi.beginPacket(bcast, CSI_PORT)) {
+    udpCsi.write((uint8_t*)buf, n);
+    udpCsi.endPacket();
   }
-  // Also try global broadcast
-  if (udp.beginPacket(IPAddress(255, 255, 255, 255), TARGET_PORT)) {
-    udp.write((uint8_t*)buf, n);
-    udp.endPacket();
+  if (udpCsi.beginPacket(IPAddress(255, 255, 255, 255), CSI_PORT)) {
+    udpCsi.write((uint8_t*)buf, n);
+    udpCsi.endPacket();
   }
 
   packetCount++;
   hasNewCSI = false;
 
-  Serial.printf("[UDP] bcast:%u ok=%d act=%.2f mov=%.2f rssi=%.0f\n",
-                TARGET_PORT, ok ? 1 : 0, activityLevel, movementIntensity, rssi);
+  Serial.printf("[UDP] CSI :%u rate=%u boost=%.2f act=%.2f cmds=%d\n",
+                CSI_PORT, sendIntervalMs, boostLevel, activityLevel, cmdCount);
 }
 
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("=== ESP32 CSI (broadcast :4210) ===");
+  Serial.println("=== ESP32 CSI closed-loop (4210 out / 4211 cmd) ===");
 
   pinMode(STATUS_LED_PIN, OUTPUT);
   statusLed(false);
 
   WiFi.mode(WIFI_STA);
   delay(50);
-
   connectWiFi();
 
   if (USE_REAL_CSI && !initRealCSI()) {
-    Serial.println("[CSI] hardware CSI unavailable — soft CSI");
+    Serial.println("[CSI] soft CSI fallback");
   }
 
-  udp.begin(4211);
-  Serial.println("Setup complete — no host IP needed");
+  udpCsi.begin(4212);   // local bind for send socket
+  udpCmd.begin(CMD_PORT);
+  Serial.printf("Listening for Echo cmds on :%u\n", CMD_PORT);
 }
 
 void loop() {
-  if (millis() - lastSendTime >= SEND_INTERVAL_MS) {
+  pollCommands();
+
+  if (millis() - lastSendTime >= sendIntervalMs) {
     sendCSIPacket();
     lastSendTime = millis();
   }
-  delay(10);
+  delay(5);
 }
