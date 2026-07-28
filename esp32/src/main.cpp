@@ -5,45 +5,33 @@
 #include <WiFiManager.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <Adafruit_NeoPixel.h>
-#include <cmath>
-#include <Preferences.h>
-
-#include <esp_wifi.h>
 #include <esp_wifi_types.h>
+#include <Preferences.h>
+#include <cmath>
 
-// ============================================================
-// ESP32 CSI Node — streams to Echo Grid / wifi-sensing host
-// UDP port 4210 is the canonical contract.
-// ============================================================
-
-#if HAS_DISPLAY
-  #include <TFT_eSPI.h>
-  #include <XPT2046_Touchscreen.h>
-
-  #define TOUCH_CS   33
-  #define TOUCH_IRQ  36
-  #define TFT_BL     21
-
-  TFT_eSPI tft = TFT_eSPI();
-  XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
+// Optional RGB — only if board has NeoPixel on GPIO2
+#ifndef USE_NEOPIXEL
+#define USE_NEOPIXEL 0
 #endif
 
-// === CONFIG ===
-// Port is fixed — matches Echo Grid CSIBridge + CSIIngestor
+#if USE_NEOPIXEL
+#include <Adafruit_NeoPixel.h>
+Adafruit_NeoPixel rgbLed(1, 2, NEO_GRB + NEO_KHZ800);
+#endif
+
+// ============================================================
+// ESP32 CSI Node — stable boot order for standard DevKit
+// UDP :4210 → Echo Grid / wifi-sensing host
+// ============================================================
+
 const uint16_t TARGET_PORT      = 4210;
 const char* NODE_ID             = "esp32_node_01";
 const uint32_t SEND_INTERVAL_MS = 450;
 const int STATUS_LED_PIN        = 2;
 
-// Server IP is loaded from NVS / WiFiManager (default below on first boot)
 char targetServerIp[32] = "192.168.1.100";
 
-const int RGB_LED_PIN = 2;
-const int NUM_PIXELS  = 1;
-Adafruit_NeoPixel rgbLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
-
-const bool USE_ESP_NOW = true;
+const bool USE_ESP_NOW  = true;
 const bool USE_REAL_CSI = true;
 const uint8_t BROADCAST_ADDRESS[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -52,9 +40,12 @@ float prevCSI[32];
 bool hasNewCSI = false;
 
 float bandMovement[4] = {0};
-float bandVariance[4] = {0};
 float movementIntensity = 0.0;
-float nodeConfidence  = 0.6;
+float nodeConfidence = 0.6;
+float activityLevel = 0;
+bool significantObstruction = false;
+int hotZoneCount = 0;
+float csiVariance = 0;
 
 WiFiUDP udp;
 Preferences prefs;
@@ -63,94 +54,50 @@ bool wifiConnected = false;
 bool espnowReady = false;
 int packetCount = 0;
 
-float csiVariance = 0;
-float activityLevel = 0;
-bool significantObstruction = false;
-int hotZoneCount = 0;
+void statusLed(bool on) {
+  digitalWrite(STATUS_LED_PIN, on ? HIGH : LOW);
+}
 
+#if USE_NEOPIXEL
 void setRGB(uint8_t r, uint8_t g, uint8_t b) {
   rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
   rgbLed.show();
 }
-
-void updateRGBStatus() {
-  if (significantObstruction) {
-    setRGB(255, 0, 0);
-  } else if (movementIntensity > 0.6) {
-    setRGB(255, 100, 0);
-  } else if (activityLevel > 0.4) {
-    setRGB(255, 200, 0);
-  } else if (!wifiConnected && espnowReady) {
-    setRGB(0, 150, 255);
-  } else if (!wifiConnected) {
-    setRGB(0, 0, 255);
-  } else if (nodeConfidence > 0.75) {
-    setRGB(0, 255, 200);
-  } else {
-    setRGB(0, 180, 0);
-  }
-}
+#else
+void setRGB(uint8_t, uint8_t, uint8_t) {}
+#endif
 
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {}
 
 void initESPNow() {
-  if (esp_now_init() != ESP_OK) return;
+  // Must be after WiFi.mode(WIFI_STA)
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESP-NOW] init failed (non-fatal)");
+    return;
+  }
   esp_now_register_send_cb(onDataSent);
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, BROADCAST_ADDRESS, 6);
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) == ESP_OK) espnowReady = true;
-}
-
-void sendViaESPNow() {
-  if (!espnowReady) return;
-
-  StaticJsonDocument<1600> doc;
-  doc["node"] = NODE_ID;
-  doc["timestamp"] = millis();
-  doc["rssi"] = (int)WiFi.RSSI();
-  doc["type"] = "wifi_csi";
-  doc["activity"] = activityLevel;
-  doc["hot_zones"] = hotZoneCount;
-  doc["obstruction"] = significantObstruction;
-  doc["movement_intensity"] = movementIntensity;
-  doc["confidence"] = nodeConfidence;
-
-  JsonArray bandMov = doc.createNestedArray("band_movement");
-  for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
-
-  JsonArray csiArr = doc.createNestedArray("csi");
-  for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
-
-  char jsonBuffer[1600];
-  serializeJson(doc, jsonBuffer);
-  esp_now_send(BROADCAST_ADDRESS, (uint8_t*)jsonBuffer, strlen(jsonBuffer));
+  if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+    espnowReady = true;
+    Serial.println("[ESP-NOW] ready");
+  } else {
+    Serial.println("[ESP-NOW] peer add failed (non-fatal)");
+  }
 }
 
 void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++) {
     int start = b * 8;
-    float mean = 0;
     float maxChange = 0;
-    float var = 0;
-
     for (int i = 0; i < 8; i++) {
       int idx = start + i;
-      mean += latestRealCSI[idx];
-      float change = fabs(latestRealCSI[idx] - prevCSI[idx]);
+      float change = fabsf(latestRealCSI[idx] - prevCSI[idx]);
       if (change > maxChange) maxChange = change;
     }
-    mean /= 8.0f;
-
-    for (int i = 0; i < 8; i++) {
-      int idx = start + i;
-      float diff = latestRealCSI[idx] - mean;
-      var += diff * diff;
-    }
-
     bandMovement[b] = maxChange;
-    bandVariance[b] = var / 8.0f;
   }
 
   float meanAll = 0;
@@ -173,60 +120,80 @@ void updateRichCSIFeatures() {
   activityLevel = constrain(csiVariance * 6.2f + movementIntensity * 0.9f, 0.0f, 1.0f);
   hotZoneCount = constrain((int)(activityLevel * 6), 0, 6);
   significantObstruction = (hotZoneCount >= 3) || (activityLevel > 0.58f);
+  nodeConfidence = constrain(0.4f + activityLevel * 0.5f, 0.35f, 0.92f);
 
-  static float prevMovement = 0;
-  float consistency = 1.0f - fabs(movementIntensity - prevMovement);
-  nodeConfidence = constrain(0.4f + consistency * 0.5f + (packetCount / 80.0f) * 0.3f, 0.35f, 0.92f);
-  prevMovement = movementIntensity;
-
-  updateRGBStatus();
   for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 }
 
 void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
-  if (!info || !info->buf) return;
+  if (!info || !info->buf || info->len < 2) return;
 
   int numSub = min(32, info->len / 2);
   for (int i = 0; i < numSub; i++) {
-    int8_t real = info->buf[i*2];
-    int8_t imag = info->buf[i*2 + 1];
-    float amp = sqrtf(real*real + imag*imag);
+    int8_t real = info->buf[i * 2];
+    int8_t imag = info->buf[i * 2 + 1];
+    float amp = sqrtf((float)real * real + (float)imag * imag);
     latestRealCSI[i] = amp / 200.0f;
     if (latestRealCSI[i] > 1.0f) latestRealCSI[i] = 1.0f;
   }
+  for (int i = numSub; i < 32; i++) latestRealCSI[i] = 0.0f;
+
   hasNewCSI = true;
   updateRichCSIFeatures();
 }
 
-void initRealCSI() {
-  esp_wifi_set_promiscuous(true);
+bool initRealCSI() {
+  esp_err_t err;
 
-  wifi_csi_config_t csi_config = {
-    .lltf_en = true,
-    .htltf_en = true,
-    .stbc_htltf2_en = true,
-    .ltf_merge_en = true,
-    .manu_scale = false
-  };
+  err = esp_wifi_set_promiscuous(true);
+  if (err != ESP_OK) {
+    Serial.printf("[CSI] promiscuous failed: %d\n", (int)err);
+    return false;
+  }
 
-  esp_wifi_set_csi_config(&csi_config);
-  esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
-  esp_wifi_set_csi(true);
+  wifi_csi_config_t csi_config = {};
+  csi_config.lltf_en = true;
+  csi_config.htltf_en = true;
+  csi_config.stbc_htltf2_en = true;
+  csi_config.ltf_merge_en = true;
+  csi_config.manu_scale = false;
 
-  for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
-  Serial.println("[CSI] Real CSI ready → UDP :4210");
+  err = esp_wifi_set_csi_config(&csi_config);
+  if (err != ESP_OK) {
+    Serial.printf("[CSI] config failed: %d (board may not support CSI)\n", (int)err);
+    return false;
+  }
+
+  err = esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("[CSI] cb failed: %d\n", (int)err);
+    return false;
+  }
+
+  err = esp_wifi_set_csi(true);
+  if (err != ESP_OK) {
+    Serial.printf("[CSI] enable failed: %d\n", (int)err);
+    return false;
+  }
+
+  for (int i = 0; i < 32; i++) {
+    latestRealCSI[i] = 0.3f;
+    prevCSI[i] = 0.3f;
+  }
+  Serial.println("[CSI] enabled → UDP :4210");
+  return true;
 }
 
 void connectWiFi() {
-  setRGB(0, 0, 255);
-
   prefs.begin("csi", true);
-  String saved = prefs.getString("server_ip", targetServerIp);
+  String saved = prefs.getString("server_ip", String(targetServerIp));
   prefs.end();
-  saved.toCharArray(targetServerIp, sizeof(targetServerIp));
+  if (saved.length() > 0 && saved.length() < (int)sizeof(targetServerIp)) {
+    saved.toCharArray(targetServerIp, sizeof(targetServerIp));
+  }
 
   WiFiManager wifiManager;
-  wifiManager.setConfigPortalTimeout(120);
+  wifiManager.setConfigPortalTimeout(180);
 
   WiFiManagerParameter custom_server(
       "server_ip",
@@ -242,7 +209,7 @@ void connectWiFi() {
     wifiConnected = true;
 
     const char* entered = custom_server.getValue();
-    if (entered && strlen(entered) > 0) {
+    if (entered && strlen(entered) >= 7) {
       strncpy(targetServerIp, entered, sizeof(targetServerIp) - 1);
       targetServerIp[sizeof(targetServerIp) - 1] = '\0';
       prefs.begin("csi", false);
@@ -250,26 +217,40 @@ void connectWiFi() {
       prefs.end();
     }
 
-    Serial.print("[WiFi] connected. CSI → ");
+    Serial.print("[WiFi] OK → ");
     Serial.print(targetServerIp);
     Serial.println(":4210");
-    setRGB(0, 180, 0);
+    statusLed(true);
   } else {
-    Serial.println("[WiFi] portal timeout — ESP-NOW only");
-    setRGB(0, 150, 255);
+    Serial.println("[WiFi] portal timeout");
+    wifiConnected = false;
   }
 }
 
 void sendCSIPacket() {
-  float rssi = WiFi.RSSI();
+  float rssi = wifiConnected ? WiFi.RSSI() : -90;
 
-  if (!USE_REAL_CSI) {
-    for (int i = 0; i < 32; i++) latestRealCSI[i] = 0.45f + (random(40) / 100.0f);
+  if (!hasNewCSI) {
+    // soft simulated fallback so host still sees traffic
+    for (int i = 0; i < 32; i++)
+      latestRealCSI[i] = 0.35f + (random(30) / 100.0f);
     updateRichCSIFeatures();
   }
 
-  if (USE_ESP_NOW && espnowReady) {
-    sendViaESPNow();
+  if (espnowReady) {
+    StaticJsonDocument<1600> doc;
+    doc["node"] = NODE_ID;
+    doc["timestamp"] = millis();
+    doc["rssi"] = (int)rssi;
+    doc["type"] = "wifi_csi";
+    doc["activity"] = activityLevel;
+    doc["movement_intensity"] = movementIntensity;
+    doc["confidence"] = nodeConfidence;
+    JsonArray csiArr = doc.createNestedArray("csi");
+    for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
+    char jsonBuffer[1600];
+    serializeJson(doc, jsonBuffer);
+    esp_now_send(BROADCAST_ADDRESS, (uint8_t*)jsonBuffer, strlen(jsonBuffer));
   }
 
   if (wifiConnected) {
@@ -291,43 +272,58 @@ void sendCSIPacket() {
     for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
 
     char jsonBuffer[1600];
-    serializeJson(doc, jsonBuffer);
+    size_t n = serializeJson(doc, jsonBuffer);
 
-    udp.beginPacket(targetServerIp, TARGET_PORT);
-    udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
-    udp.endPacket();
+    if (udp.beginPacket(targetServerIp, TARGET_PORT)) {
+      udp.write((uint8_t*)jsonBuffer, n);
+      udp.endPacket();
+    }
   }
 
   packetCount++;
   hasNewCSI = false;
 
-  setRGB(255, 255, 255);
-  delay(25);
-  updateRGBStatus();
-
-  Serial.printf("[UDP:%u] %s | Act=%.2f Mov=%.2f\n",
-                TARGET_PORT, targetServerIp, activityLevel, movementIntensity);
+  Serial.printf("[UDP] %s:%u act=%.2f mov=%.2f rssi=%.0f\n",
+                targetServerIp, TARGET_PORT, activityLevel, movementIntensity, rssi);
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(150);
+  delay(300);
+  Serial.println();
+  Serial.println("=== ESP32 CSI Node (stable) ===");
 
   pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, LOW);
+  statusLed(false);
 
+#if USE_NEOPIXEL
   rgbLed.begin();
-  rgbLed.setBrightness(80);
-  setRGB(255, 0, 255);
+  rgbLed.setBrightness(60);
+  setRGB(0, 0, 80);
+#endif
+
+  // Critical boot order for ESP32:
+  // 1) WiFi STA mode
+  // 2) ESP-NOW (optional)
+  // 3) WiFiManager connect
+  // 4) CSI (optional, soft-fail)
+  WiFi.mode(WIFI_STA);
+  delay(50);
 
   if (USE_ESP_NOW) initESPNow();
+
   connectWiFi();
-  if (USE_REAL_CSI) initRealCSI();
+
+  if (USE_REAL_CSI) {
+    if (!initRealCSI()) {
+      Serial.println("[CSI] hardware CSI unavailable — using soft CSI");
+    }
+  }
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node ready ===");
-  Serial.printf("Target %s:%u (Echo Grid / CSI host)\n", targetServerIp, TARGET_PORT);
+  Serial.printf("Target %s:%u\n", targetServerIp, TARGET_PORT);
+  Serial.println("Setup complete");
 }
 
 void loop() {

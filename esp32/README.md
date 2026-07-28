@@ -1,44 +1,35 @@
 # ESP32 CSI Nodes
 
-Stream WiFi CSI to a host on **UDP port 4210**.
+UDP **port 4210** → Echo Grid / wifi-sensing host.
 
-Compatible consumers:
-- `wifi-sensing-system` CSI ingestor
-- [Echo Grid Ultrasonic OS](https://github.com/TheBabelDragon/echo-grid-ultrasonic-os) (`python visualization/dashboard.py --csi`)
+## If you hit Guru Meditation / reboot loop
 
-## Canonical contract
+Use the **simple** Arduino sketch first:
 
-| Field | Value |
-|-------|-------|
-| Port | **4210** |
-| Protocol | UDP JSON |
-| Keys | `node`, `rssi`, `csi` (32 floats), `type: wifi_csi` |
+1. Open `esp32_csi_udp_sender.ino` in Arduino IDE
+2. Libraries: ArduinoJson, WiFiManager
+3. Board: ESP32 Dev Module
+4. Port: `/dev/ttyUSB0`
+5. **Tools → Erase Flash → All Flash Contents**
+6. Upload
 
-## Server IP
-
-Set once via the WiFiManager portal field **"Echo Grid / CSI host IP"**  
-(stored in NVS — survives reboot).
-
-1. Flash firmware
-2. Join `ESP32-CSI-<node>` AP if needed
-3. Enter your PC IP (machine running Echo Grid)
-4. Reboot node → packets flow to `IP:4210`
-
-## Flash
+Or PlatformIO (fixed boot order):
 
 ```bash
-# PlatformIO (recommended)
-./flash.sh --standard
-
-# or Arduino IDE: open esp32_csi_udp_sender.ino
+git pull
+pio run -e esp32-standard -t erase
+pio run -e esp32-standard -t upload --upload-port /dev/ttyUSB0
+pio device monitor -b 115200 --port /dev/ttyUSB0
 ```
 
-## Echo Grid quick path
+You should see `Setup complete` and `[UDP] ...:4210` — **not** continuous reboots.
+
+## Portal
+
+Join `ESP32-CSI-*` → `http://192.168.4.1` → set home Wi‑Fi + **Echo Grid host IP**.
+
+## Echo Grid
 
 ```bash
-# on PC
-cd echo-grid-ultrasonic-os
 python visualization/dashboard.py --csi
-
-# on ESP32: flash this repo, set host IP in portal to the PC
 ```
