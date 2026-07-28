@@ -1,34 +1,44 @@
-# ESP32 CSI Project
+# ESP32 CSI Nodes
 
-## Project Structure (PlatformIO)
+Stream WiFi CSI to a host on **UDP port 4210**.
 
-```
-esp32/
-├── platformio.ini
-├── src/
-│   └── main.cpp          # Unified code for all boards
-├── flash.sh
-└── README.md
-```
+Compatible consumers:
+- `wifi-sensing-system` CSI ingestor
+- [Echo Grid Ultrasonic OS](https://github.com/TheBabelDragon/echo-grid-ultrasonic-os) (`python visualization/dashboard.py --csi`)
 
-## Supported Boards
+## Canonical contract
 
-- **Standard ESP32** (WROOM-32UE, DevKit, etc.) → `env:esp32-standard`
-- **Cheap Yellow Display** (ESP32-2432S028) → `env:esp32-cyd`
+| Field | Value |
+|-------|-------|
+| Port | **4210** |
+| Protocol | UDP JSON |
+| Keys | `node`, `rssi`, `csi` (32 floats), `type: wifi_csi` |
 
-## Flashing
+## Server IP
+
+Set once via the WiFiManager portal field **"Echo Grid / CSI host IP"**  
+(stored in NVS — survives reboot).
+
+1. Flash firmware
+2. Join `ESP32-CSI-<node>` AP if needed
+3. Enter your PC IP (machine running Echo Grid)
+4. Reboot node → packets flow to `IP:4210`
+
+## Flash
 
 ```bash
+# PlatformIO (recommended)
 ./flash.sh --standard
-./flash.sh --cyd
-./flash.sh --cyd --monitor
+
+# or Arduino IDE: open esp32_csi_udp_sender.ino
 ```
 
-The code in `src/main.cpp` uses `#if HAS_DISPLAY` to include or exclude display code at compile time.
+## Echo Grid quick path
 
-## Key Features
+```bash
+# on PC
+cd echo-grid-ultrasonic-os
+python visualization/dashboard.py --csi
 
-- WiFiManager for configuration
-- Real CSI collection
-- Unified code for multiple hardware platforms
-- Proper `src/main.cpp` structure for PlatformIO
+# on ESP32: flash this repo, set host IP in portal to the PC
+```

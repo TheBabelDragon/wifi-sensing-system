@@ -7,12 +7,14 @@
 #include <esp_wifi.h>
 #include <Adafruit_NeoPixel.h>
 #include <cmath>
+#include <Preferences.h>
 
 #include <esp_wifi.h>
 #include <esp_wifi_types.h>
 
 // ============================================================
-// ESP32 CSI Node - RGB IO2 (Lonely Binary Gold Edition)
+// ESP32 CSI Node — streams to Echo Grid / wifi-sensing host
+// UDP port 4210 is the canonical contract.
 // ============================================================
 
 #if HAS_DISPLAY
@@ -28,18 +30,19 @@
 #endif
 
 // === CONFIG ===
-const char* TARGET_SERVER_IP  = "192.168.1.100";
-const uint16_t TARGET_PORT    = 4210;
-const char* NODE_ID           = "esp32_node_01";
+// Port is fixed — matches Echo Grid CSIBridge + CSIIngestor
+const uint16_t TARGET_PORT      = 4210;
+const char* NODE_ID             = "esp32_node_01";
 const uint32_t SEND_INTERVAL_MS = 450;
-const int STATUS_LED_PIN      = 2;
+const int STATUS_LED_PIN        = 2;
 
-// RGB LED on Lonely Binary Gold Edition
-const int RGB_LED_PIN = 2;   // Confirmed: RGB IO2
+// Server IP is loaded from NVS / WiFiManager (default below on first boot)
+char targetServerIp[32] = "192.168.1.100";
+
+const int RGB_LED_PIN = 2;
 const int NUM_PIXELS  = 1;
 Adafruit_NeoPixel rgbLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
-// ESP-NOW
 const bool USE_ESP_NOW = true;
 const bool USE_REAL_CSI = true;
 const uint8_t BROADCAST_ADDRESS[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -54,6 +57,7 @@ float movementIntensity = 0.0;
 float nodeConfidence  = 0.6;
 
 WiFiUDP udp;
+Preferences prefs;
 unsigned long lastSendTime = 0;
 bool wifiConnected = false;
 bool espnowReady = false;
@@ -64,7 +68,6 @@ float activityLevel = 0;
 bool significantObstruction = false;
 int hotZoneCount = 0;
 
-// === RGB LED ===
 void setRGB(uint8_t r, uint8_t g, uint8_t b) {
   rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
   rgbLed.show();
@@ -88,31 +91,16 @@ void updateRGBStatus() {
   }
 }
 
-// === ESP-NOW ===
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {}
 
 void initESPNow() {
-  Serial.println("[ESP-NOW] Initializing...");
-
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("[ESP-NOW] Init FAILED");
-    return;
-  }
-
+  if (esp_now_init() != ESP_OK) return;
   esp_now_register_send_cb(onDataSent);
-
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, BROADCAST_ADDRESS, 6);
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
-
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("[ESP-NOW] Failed to add broadcast peer");
-    return;
-  }
-
-  espnowReady = true;
-  Serial.println("[ESP-NOW] Ready (broadcast mode)");
+  if (esp_now_add_peer(&peerInfo) == ESP_OK) espnowReady = true;
 }
 
 void sendViaESPNow() {
@@ -140,7 +128,6 @@ void sendViaESPNow() {
   esp_now_send(BROADCAST_ADDRESS, (uint8_t*)jsonBuffer, strlen(jsonBuffer));
 }
 
-// === Rich CSI Features ===
 void updateRichCSIFeatures() {
   for (int b = 0; b < 4; b++) {
     int start = b * 8;
@@ -196,7 +183,6 @@ void updateRichCSIFeatures() {
   for (int i = 0; i < 32; i++) prevCSI[i] = latestRealCSI[i];
 }
 
-// === Real CSI Callback ===
 void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
   if (!info || !info->buf) return;
 
@@ -228,24 +214,48 @@ void initRealCSI() {
   esp_wifi_set_csi(true);
 
   for (int i = 0; i < 32; i++) prevCSI[i] = 0.3f;
-  Serial.println("[CSI] Rich 4-Band + RGB IO2 ready");
+  Serial.println("[CSI] Real CSI ready → UDP :4210");
 }
 
-// === WiFi + ESP-NOW ===
 void connectWiFi() {
   setRGB(0, 0, 255);
 
+  prefs.begin("csi", true);
+  String saved = prefs.getString("server_ip", targetServerIp);
+  prefs.end();
+  saved.toCharArray(targetServerIp, sizeof(targetServerIp));
+
   WiFiManager wifiManager;
-  wifiManager.setConfigPortalTimeout(35);
+  wifiManager.setConfigPortalTimeout(120);
+
+  WiFiManagerParameter custom_server(
+      "server_ip",
+      "Echo Grid / CSI host IP",
+      targetServerIp,
+      31
+  );
+  wifiManager.addParameter(&custom_server);
 
   String apName = String("ESP32-CSI-") + NODE_ID;
 
   if (wifiManager.autoConnect(apName.c_str())) {
     wifiConnected = true;
-    Serial.println("WiFi connected");
+
+    const char* entered = custom_server.getValue();
+    if (entered && strlen(entered) > 0) {
+      strncpy(targetServerIp, entered, sizeof(targetServerIp) - 1);
+      targetServerIp[sizeof(targetServerIp) - 1] = '\0';
+      prefs.begin("csi", false);
+      prefs.putString("server_ip", targetServerIp);
+      prefs.end();
+    }
+
+    Serial.print("[WiFi] connected. CSI → ");
+    Serial.print(targetServerIp);
+    Serial.println(":4210");
     setRGB(0, 180, 0);
   } else {
-    Serial.println("No WiFi - running in ESP-NOW only mode");
+    Serial.println("[WiFi] portal timeout — ESP-NOW only");
     setRGB(0, 150, 255);
   }
 }
@@ -283,7 +293,7 @@ void sendCSIPacket() {
     char jsonBuffer[1600];
     serializeJson(doc, jsonBuffer);
 
-    udp.beginPacket(TARGET_SERVER_IP, TARGET_PORT);
+    udp.beginPacket(targetServerIp, TARGET_PORT);
     udp.write((uint8_t*)jsonBuffer, strlen(jsonBuffer));
     udp.endPacket();
   }
@@ -295,8 +305,8 @@ void sendCSIPacket() {
   delay(25);
   updateRGBStatus();
 
-  Serial.printf("[Sent] Act=%.2f | Mov=%.2f | Conf=%.2f | HZ=%d\n",
-                activityLevel, movementIntensity, nodeConfidence, hotZoneCount);
+  Serial.printf("[UDP:%u] %s | Act=%.2f Mov=%.2f\n",
+                TARGET_PORT, targetServerIp, activityLevel, movementIntensity);
 }
 
 void setup() {
@@ -310,28 +320,21 @@ void setup() {
   rgbLed.setBrightness(80);
   setRGB(255, 0, 255);
 
-  if (USE_ESP_NOW) {
-    initESPNow();
-  }
-
+  if (USE_ESP_NOW) initESPNow();
   connectWiFi();
-
-  if (USE_REAL_CSI) {
-    initRealCSI();
-  }
+  if (USE_REAL_CSI) initRealCSI();
 
   udp.begin(4211);
 
-  Serial.println("=== ESP32 CSI Node (RGB IO2) Ready ===");
+  Serial.println("=== ESP32 CSI Node ready ===");
+  Serial.printf("Target %s:%u (Echo Grid / CSI host)\n", targetServerIp, TARGET_PORT);
 }
 
 void loop() {
   unsigned long now = millis();
-
   if (now - lastSendTime >= SEND_INTERVAL_MS) {
     sendCSIPacket();
     lastSendTime = now;
   }
-
   delay(10);
 }
