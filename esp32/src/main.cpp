@@ -34,7 +34,6 @@ uint32_t minIntervalMs          = 120;
 uint32_t maxIntervalMs          = 1200;
 float boostLevel                = 0.0f;
 
-// Field mirror from Echo Grid (closed-loop telemetry)
 float fieldEntropy              = 0.0f;
 int   fieldTracks               = 0;
 float fieldMotion               = 0.0f;
@@ -61,6 +60,14 @@ bool wifiConnected = false;
 int packetCount = 0;
 int cmdCount = 0;
 
+const char* currentBandLabel() {
+  // ESP32 classic STA is 2.4 GHz; keep explicit for host multiband fuser
+  int ch = WiFi.channel();
+  if (ch >= 1 && ch <= 14) return "2.4";
+  if (ch >= 36) return "5";
+  return "2.4";
+}
+
 #if HAS_DISPLAY
 const uint16_t COL_BG     = 0x0841;
 const uint16_t COL_PANEL  = 0x1082;
@@ -82,11 +89,9 @@ void drawRoundPanel(int x, int y, int w, int h, uint16_t fill) {
 void initDisplay() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
-
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(COL_BG);
-
   tft.fillRect(0, 0, 320, 26, COL_PANEL);
   tft.setTextColor(COL_CYAN, COL_PANEL);
   tft.setTextDatum(TL_DATUM);
@@ -95,14 +100,12 @@ void initDisplay() {
   tft.drawString(NODE_ID, 95, 8, 1);
   tft.setTextColor(COL_DIM, COL_PANEL);
   tft.drawString("4210/4211", 248, 8, 1);
-
   drawRoundPanel(4, 30, 168, 44, COL_PANEL);
   drawRoundPanel(176, 30, 70, 44, COL_PANEL);
   drawRoundPanel(250, 30, 66, 44, COL_PANEL);
   drawRoundPanel(4, 78, 312, 28, COL_PANEL);
-  drawRoundPanel(4, 110, 312, 28, COL_PANEL);  // FIELD mirror row
+  drawRoundPanel(4, 110, 312, 28, COL_PANEL);
   drawRoundPanel(4, 142, 312, 90, COL_PANEL);
-
   tft.setTextColor(COL_DIM, COL_PANEL);
   tft.drawString("MOTION", 10, 34, 1);
   tft.drawString("BOOST", 182, 34, 1);
@@ -145,19 +148,16 @@ void drawStatusChips() {
   tft.fillRoundRect(8, 82, 64, 18, 3, wc);
   tft.setTextColor(COL_BG, wc);
   tft.drawString(wifiConnected ? "WiFi" : "--", 18, 86, 1);
-
   tft.fillRoundRect(78, 82, 70, 18, 3, COL_BAR_BG);
   tft.setTextColor(COL_MAG, COL_BAR_BG);
   char cb[12];
   snprintf(cb, sizeof(cb), "cmd %d", cmdCount);
   tft.drawString(cb, 84, 86, 1);
-
   tft.fillRoundRect(154, 82, 70, 18, 3, COL_BAR_BG);
   tft.setTextColor(COL_YELLOW, COL_BAR_BG);
   char sb[12];
   snprintf(sb, sizeof(sb), "%ddBm", wifiConnected ? (int)WiFi.RSSI() : 0);
   tft.drawString(sb, 160, 86, 1);
-
   tft.fillRoundRect(230, 82, 80, 18, 3, COL_BAR_BG);
   tft.setTextColor(COL_WHITE, COL_BAR_BG);
   char pb[12];
@@ -166,25 +166,19 @@ void drawStatusChips() {
 }
 
 void drawFieldMirror() {
-  // Echo Grid influences the display here
   tft.fillRect(8, 114, 304, 20, COL_PANEL);
   tft.setTextColor(COL_DIM, COL_PANEL);
   tft.drawString("FIELD", 10, 118, 1);
-
   if (!hasFieldMirror) {
     tft.setTextColor(COL_DIM, COL_PANEL);
     tft.drawString("waiting host...", 50, 118, 1);
     return;
   }
-
   tft.setTextColor(COL_CYAN, COL_PANEL);
   char line[48];
   snprintf(line, sizeof(line), "H%.2f  T%d  df%.0fHz", fieldEntropy, fieldTracks, fieldDfMax);
   tft.drawString(line, 50, 118, 1);
-
-  // mini entropy bar on the right
-  int bw = 60, bh = 12;
-  int bx = 250, by = 116;
+  int bw = 60, bh = 12, bx = 250, by = 116;
   tft.fillRect(bx, by, bw, bh, COL_BAR_BG);
   int f = (int)(constrain(fieldEntropy * 2.0f, 0.0f, 1.0f) * (bw - 2));
   if (f > 0) tft.fillRect(bx + 1, by + 1, f, bh - 2, fieldTracks > 0 ? COL_ORANGE : COL_CYAN);
@@ -196,9 +190,7 @@ void drawSpectrum() {
   const int barW = 8;
   const int gap = 1;
   const int startX = 12;
-
   tft.fillRect(10, 156, 300, maxH + 4, COL_PANEL);
-
   for (int i = 0; i < 32; i++) {
     float v = latestRealCSI[i];
     if (v < 0) v = 0;
@@ -206,17 +198,11 @@ void drawSpectrum() {
     int h = (int)(v * maxH);
     if (h < 2) h = 2;
     int x = startX + i * (barW + gap);
-
     uint16_t c;
-    if (boostLevel > 0.4f || fieldTracks > 0) {
-      c = v > 0.55f ? COL_ORANGE : COL_MAG;
-    } else if (v > 0.65f) {
-      c = COL_CYAN;
-    } else if (v > 0.35f) {
-      c = 0x5DFF;
-    } else {
-      c = 0x3A2F;
-    }
+    if (boostLevel > 0.4f || fieldTracks > 0) c = v > 0.55f ? COL_ORANGE : COL_MAG;
+    else if (v > 0.65f) c = COL_CYAN;
+    else if (v > 0.35f) c = 0x5DFF;
+    else c = 0x3A2F;
     tft.fillRect(x, baseY - h, barW, h, c);
     tft.drawFastHLine(x, baseY - h, barW, COL_WHITE);
   }
@@ -327,7 +313,6 @@ void handleEchoCommand(const char* json, size_t len) {
   if (strcmp(type, "echo_cmd") != 0) return;
   const char* cmd = doc["cmd"] | "";
   cmdCount++;
-
   if (strcmp(cmd, "field") == 0) {
     fieldEntropy = doc["entropy"] | 0.0;
     fieldTracks  = doc["tracks"] | 0;
@@ -373,6 +358,8 @@ void sendCSIPacket() {
   doc["timestamp"] = millis();
   doc["rssi"] = (int)rssi;
   doc["type"] = "wifi_csi";
+  doc["band"] = currentBandLabel();
+  doc["channel"] = WiFi.channel();
   doc["activity"] = activityLevel;
   doc["hot_zones"] = hotZoneCount;
   doc["obstruction"] = significantObstruction;
@@ -408,7 +395,7 @@ void sendCSIPacket() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("=== ESP32 CSI closed-loop + field mirror ===");
+  Serial.println("=== ESP32 CSI closed-loop + band tag ===");
   Serial.printf("NODE_ID=%s  CSI:%u  CMD:%u  DISPLAY=%d\n",
                 NODE_ID, CSI_PORT, CMD_PORT, HAS_DISPLAY);
 
