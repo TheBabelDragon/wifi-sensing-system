@@ -34,10 +34,14 @@ uint32_t minIntervalMs          = 120;
 uint32_t maxIntervalMs          = 1200;
 float boostLevel                = 0.0f;
 
+// Field mirror from Echo Grid (closed-loop telemetry)
 float fieldEntropy              = 0.0f;
 int   fieldTracks               = 0;
 float fieldMotion               = 0.0f;
 float fieldDfMax                = 0.0f;
+int   fieldNodes                = 0;
+int   fieldBands                = 0;
+bool  fieldAgreed               = false;
 bool  hasFieldMirror            = false;
 
 float latestRealCSI[32];
@@ -61,7 +65,6 @@ int packetCount = 0;
 int cmdCount = 0;
 
 const char* currentBandLabel() {
-  // ESP32 classic STA is 2.4 GHz; keep explicit for host multiband fuser
   int ch = WiFi.channel();
   if (ch >= 1 && ch <= 14) return "2.4";
   if (ch >= 36) return "5";
@@ -69,6 +72,7 @@ const char* currentBandLabel() {
 }
 
 #if HAS_DISPLAY
+// ---- palette ----
 const uint16_t COL_BG     = 0x0841;
 const uint16_t COL_PANEL  = 0x1082;
 const uint16_t COL_CYAN   = 0x07FF;
@@ -80,117 +84,171 @@ const uint16_t COL_YELLOW = 0xFFE0;
 const uint16_t COL_WHITE  = 0xFFFF;
 const uint16_t COL_DIM    = 0x8410;
 const uint16_t COL_BAR_BG = 0x2104;
+const uint16_t COL_PURPLE = 0xA01F;
 
 void drawRoundPanel(int x, int y, int w, int h, uint16_t fill) {
-  tft.fillRoundRect(x, y, w, h, 6, fill);
-  tft.drawRoundRect(x, y, w, h, 6, COL_DIM);
+  tft.fillRoundRect(x, y, w, h, 5, fill);
+  tft.drawRoundRect(x, y, w, h, 5, COL_DIM);
 }
 
 void initDisplay() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
   tft.init();
-  tft.setRotation(1);
+  tft.setRotation(1);  // landscape 320x240
   tft.fillScreen(COL_BG);
-  tft.fillRect(0, 0, 320, 26, COL_PANEL);
-  tft.setTextColor(COL_CYAN, COL_PANEL);
+
+  // Header
+  tft.fillRect(0, 0, 320, 22, COL_PANEL);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("ECHO CSI", 6, 6, 2);
+  tft.setTextColor(COL_CYAN, COL_PANEL);
+  tft.drawString("ECHO GRID CSI", 4, 4, 2);
   tft.setTextColor(COL_WHITE, COL_PANEL);
-  tft.drawString(NODE_ID, 95, 8, 1);
+  tft.drawString(NODE_ID, 130, 6, 1);
   tft.setTextColor(COL_DIM, COL_PANEL);
-  tft.drawString("4210/4211", 248, 8, 1);
-  drawRoundPanel(4, 30, 168, 44, COL_PANEL);
-  drawRoundPanel(176, 30, 70, 44, COL_PANEL);
-  drawRoundPanel(250, 30, 66, 44, COL_PANEL);
-  drawRoundPanel(4, 78, 312, 28, COL_PANEL);
-  drawRoundPanel(4, 110, 312, 28, COL_PANEL);
-  drawRoundPanel(4, 142, 312, 90, COL_PANEL);
+  tft.drawString("CYD", 290, 6, 1);
+
+  // Row 1: motion | boost | rate
+  drawRoundPanel(2, 24, 156, 40, COL_PANEL);
+  drawRoundPanel(162, 24, 76, 40, COL_PANEL);
+  drawRoundPanel(242, 24, 76, 40, COL_PANEL);
+
+  // Row 2: status chips
+  drawRoundPanel(2, 66, 316, 22, COL_PANEL);
+
+  // Row 3: field mirror (primary)
+  drawRoundPanel(2, 90, 316, 48, COL_PANEL);
+
+  // Row 4: spectrum (maximized)
+  drawRoundPanel(2, 140, 316, 98, COL_PANEL);
+
   tft.setTextColor(COL_DIM, COL_PANEL);
-  tft.drawString("MOTION", 10, 34, 1);
-  tft.drawString("BOOST", 182, 34, 1);
-  tft.drawString("RATE", 256, 34, 1);
-  tft.drawString("FIELD", 10, 114, 1);
-  tft.drawString("SPECTRUM", 10, 146, 1);
+  tft.drawString("MOTION", 8, 26, 1);
+  tft.drawString("BOOST", 168, 26, 1);
+  tft.drawString("RATE", 248, 26, 1);
+  tft.drawString("FIELD / FUSE", 8, 92, 1);
+  tft.drawString("CSI SPECTRUM", 8, 142, 1);
 }
 
 void drawMotionBar(float v) {
-  int x = 10, y = 48, w = 152, h = 16;
+  int x = 8, y = 38, w = 144, h = 18;
   tft.fillRoundRect(x, y, w, h, 3, COL_BAR_BG);
   int fill = (int)(v * (w - 2));
   if (fill < 0) fill = 0;
   if (fill > w - 2) fill = w - 2;
   uint16_t c = v > 0.7f ? COL_ORANGE : (v > 0.35f ? COL_CYAN : COL_GREEN);
   if (fill > 0) tft.fillRoundRect(x + 1, y + 1, fill, h - 2, 2, c);
+  tft.setTextColor(COL_WHITE, COL_PANEL);
+  char vb[8];
+  snprintf(vb, sizeof(vb), "%.2f", v);
+  tft.drawString(vb, 120, 26, 1);
 }
 
 void drawBoostGauge(float b) {
-  tft.fillRect(182, 48, 58, 16, COL_BAR_BG);
-  int fw = (int)(b * 56);
-  if (fw > 0) tft.fillRect(183, 49, fw, 14, b > 0.3f ? COL_ORANGE : COL_DIM);
+  tft.fillRect(168, 38, 64, 18, COL_BAR_BG);
+  int fw = (int)(b * 62);
+  if (fw > 0) tft.fillRect(169, 39, fw, 16, b > 0.3f ? COL_ORANGE : COL_DIM);
   tft.setTextColor(COL_WHITE, COL_PANEL);
   char buf[8];
   snprintf(buf, sizeof(buf), "%d%%", (int)(b * 100));
-  tft.drawString(buf, 182, 36, 1);
+  tft.drawString(buf, 168, 26, 1);
 }
 
 void drawRate() {
-  tft.fillRect(254, 48, 56, 16, COL_BAR_BG);
+  tft.fillRect(248, 38, 64, 18, COL_BAR_BG);
   tft.setTextColor(COL_CYAN, COL_BAR_BG);
   char rb[12];
-  snprintf(rb, sizeof(rb), "%u", sendIntervalMs);
-  tft.drawString(rb, 258, 50, 1);
+  snprintf(rb, sizeof(rb), "%ums", sendIntervalMs);
+  tft.drawString(rb, 252, 42, 1);
 }
 
 void drawStatusChips() {
-  tft.fillRect(8, 82, 304, 20, COL_PANEL);
+  tft.fillRect(6, 68, 308, 18, COL_PANEL);
+
   uint16_t wc = wifiConnected ? COL_GREEN : COL_RED;
-  tft.fillRoundRect(8, 82, 64, 18, 3, wc);
+  tft.fillRoundRect(6, 68, 48, 16, 3, wc);
   tft.setTextColor(COL_BG, wc);
-  tft.drawString(wifiConnected ? "WiFi" : "--", 18, 86, 1);
-  tft.fillRoundRect(78, 82, 70, 18, 3, COL_BAR_BG);
+  tft.drawString(wifiConnected ? "WiFi" : "--", 12, 71, 1);
+
+  // band + channel
+  tft.fillRoundRect(58, 68, 56, 16, 3, COL_BAR_BG);
+  tft.setTextColor(COL_YELLOW, COL_BAR_BG);
+  char bb[12];
+  snprintf(bb, sizeof(bb), "%s/%d", currentBandLabel(), wifiConnected ? WiFi.channel() : 0);
+  tft.drawString(bb, 62, 71, 1);
+
+  tft.fillRoundRect(118, 68, 52, 16, 3, COL_BAR_BG);
   tft.setTextColor(COL_MAG, COL_BAR_BG);
   char cb[12];
-  snprintf(cb, sizeof(cb), "cmd %d", cmdCount);
-  tft.drawString(cb, 84, 86, 1);
-  tft.fillRoundRect(154, 82, 70, 18, 3, COL_BAR_BG);
-  tft.setTextColor(COL_YELLOW, COL_BAR_BG);
+  snprintf(cb, sizeof(cb), "c%d", cmdCount);
+  tft.drawString(cb, 124, 71, 1);
+
+  tft.fillRoundRect(174, 68, 58, 16, 3, COL_BAR_BG);
+  tft.setTextColor(COL_CYAN, COL_BAR_BG);
   char sb[12];
   snprintf(sb, sizeof(sb), "%ddBm", wifiConnected ? (int)WiFi.RSSI() : 0);
-  tft.drawString(sb, 160, 86, 1);
-  tft.fillRoundRect(230, 82, 80, 18, 3, COL_BAR_BG);
+  tft.drawString(sb, 178, 71, 1);
+
+  tft.fillRoundRect(236, 68, 40, 16, 3, COL_BAR_BG);
   tft.setTextColor(COL_WHITE, COL_BAR_BG);
-  char pb[12];
-  snprintf(pb, sizeof(pb), "p%d", packetCount);
-  tft.drawString(pb, 240, 86, 1);
+  char pb[10];
+  snprintf(pb, sizeof(pb), "p%d", packetCount % 1000);
+  tft.drawString(pb, 240, 71, 1);
+
+  // agree badge
+  uint16_t ac = (hasFieldMirror && fieldAgreed) ? COL_GREEN : COL_DIM;
+  tft.fillRoundRect(280, 68, 34, 16, 3, ac);
+  tft.setTextColor(COL_BG, ac);
+  tft.drawString(hasFieldMirror && fieldAgreed ? "AGR" : "--", 284, 71, 1);
 }
 
 void drawFieldMirror() {
-  tft.fillRect(8, 114, 304, 20, COL_PANEL);
-  tft.setTextColor(COL_DIM, COL_PANEL);
-  tft.drawString("FIELD", 10, 118, 1);
+  tft.fillRect(6, 102, 308, 32, COL_PANEL);
+
   if (!hasFieldMirror) {
     tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("waiting host...", 50, 118, 1);
+    tft.drawString("waiting Echo Grid host on :4211...", 8, 110, 1);
     return;
   }
+
+  // Line 1: entropy + tracks + df
   tft.setTextColor(COL_CYAN, COL_PANEL);
-  char line[48];
-  snprintf(line, sizeof(line), "H%.2f  T%d  df%.0fHz", fieldEntropy, fieldTracks, fieldDfMax);
-  tft.drawString(line, 50, 118, 1);
-  int bw = 60, bh = 12, bx = 250, by = 116;
+  char l1[56];
+  snprintf(l1, sizeof(l1), "H %.2f   T %d   |df| %.0f Hz",
+           fieldEntropy, fieldTracks, fieldDfMax);
+  tft.drawString(l1, 8, 102, 1);
+
+  // Line 2: fuse meta + host motion
+  tft.setTextColor(COL_YELLOW, COL_PANEL);
+  char l2[56];
+  snprintf(l2, sizeof(l2), "nodes %d  bands %d  host-mot %.2f  %s",
+           fieldNodes, fieldBands, fieldMotion,
+           fieldAgreed ? "AGREED" : "single");
+  tft.drawString(l2, 8, 116, 1);
+
+  // entropy bar right
+  int bw = 50, bh = 10, bx = 262, by = 104;
   tft.fillRect(bx, by, bw, bh, COL_BAR_BG);
   int f = (int)(constrain(fieldEntropy * 2.0f, 0.0f, 1.0f) * (bw - 2));
-  if (f > 0) tft.fillRect(bx + 1, by + 1, f, bh - 2, fieldTracks > 0 ? COL_ORANGE : COL_CYAN);
+  if (f > 0) tft.fillRect(bx + 1, by + 1, f, bh - 2,
+                          fieldTracks > 0 ? COL_ORANGE : COL_CYAN);
+
+  // mini track dots
+  for (int i = 0; i < 6; i++) {
+    uint16_t dc = (i < fieldTracks) ? COL_ORANGE : COL_BAR_BG;
+    tft.fillCircle(268 + i * 8, 124, 3, dc);
+  }
 }
 
 void drawSpectrum() {
-  const int baseY = 224;
-  const int maxH = 68;
+  const int baseY = 230;
+  const int maxH = 78;
   const int barW = 8;
   const int gap = 1;
-  const int startX = 12;
-  tft.fillRect(10, 156, 300, maxH + 4, COL_PANEL);
+  const int startX = 10;
+
+  tft.fillRect(6, 154, 308, maxH + 6, COL_PANEL);
+
   for (int i = 0; i < 32; i++) {
     float v = latestRealCSI[i];
     if (v < 0) v = 0;
@@ -198,14 +256,28 @@ void drawSpectrum() {
     int h = (int)(v * maxH);
     if (h < 2) h = 2;
     int x = startX + i * (barW + gap);
+
     uint16_t c;
-    if (boostLevel > 0.4f || fieldTracks > 0) c = v > 0.55f ? COL_ORANGE : COL_MAG;
-    else if (v > 0.65f) c = COL_CYAN;
-    else if (v > 0.35f) c = 0x5DFF;
-    else c = 0x3A2F;
+    if (fieldAgreed && hasFieldMirror) {
+      c = v > 0.55f ? COL_ORANGE : COL_PURPLE;
+    } else if (boostLevel > 0.4f || fieldTracks > 0) {
+      c = v > 0.55f ? COL_ORANGE : COL_MAG;
+    } else if (v > 0.65f) {
+      c = COL_CYAN;
+    } else if (v > 0.35f) {
+      c = 0x5DFF;
+    } else {
+      c = 0x3A2F;
+    }
     tft.fillRect(x, baseY - h, barW, h, c);
     tft.drawFastHLine(x, baseY - h, barW, COL_WHITE);
   }
+
+  // subcarrier index ticks
+  tft.setTextColor(COL_DIM, COL_PANEL);
+  tft.drawString("0", 10, 232, 1);
+  tft.drawString("16", 150, 232, 1);
+  tft.drawString("31", 290, 232, 1);
 }
 
 void updateDisplay() {
@@ -313,11 +385,15 @@ void handleEchoCommand(const char* json, size_t len) {
   if (strcmp(type, "echo_cmd") != 0) return;
   const char* cmd = doc["cmd"] | "";
   cmdCount++;
+
   if (strcmp(cmd, "field") == 0) {
     fieldEntropy = doc["entropy"] | 0.0;
     fieldTracks  = doc["tracks"] | 0;
     fieldMotion  = doc["motion"] | 0.0;
     fieldDfMax   = doc["df_max"] | 0.0;
+    fieldNodes   = doc["nodes"] | 0;
+    fieldBands   = doc["bands"] | 0;
+    fieldAgreed  = doc["agreed"] | false;
     hasFieldMirror = true;
   } else if (strcmp(cmd, "set_rate") == 0) {
     uint32_t ms = doc["interval_ms"] | sendIntervalMs;
@@ -395,7 +471,7 @@ void sendCSIPacket() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("=== ESP32 CSI closed-loop + band tag ===");
+  Serial.println("=== ESP32 CSI + CYD max display ===");
   Serial.printf("NODE_ID=%s  CSI:%u  CMD:%u  DISPLAY=%d\n",
                 NODE_ID, CSI_PORT, CMD_PORT, HAS_DISPLAY);
 
@@ -429,7 +505,7 @@ void loop() {
     lastSendTime = millis();
   }
 #if HAS_DISPLAY
-  if (millis() - lastUiTime > 250) {
+  if (millis() - lastUiTime > 200) {
     updateDisplay();
     lastUiTime = millis();
   }
