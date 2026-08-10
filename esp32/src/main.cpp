@@ -29,12 +29,16 @@ const char* NODE_ID             = NODE_ID_STR;
 const int STATUS_LED_PIN        = 2;
 const bool USE_REAL_CSI         = true;
 
+// WiFi policy: sensing must NOT wait on host LAN join.
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 12000;
+const uint32_t WIFI_RECONNECT_MS       = 15000;
+const uint32_t WIFI_PORTAL_TIMEOUT_S   = 90;
+
 uint32_t sendIntervalMs         = 450;
 uint32_t minIntervalMs          = 120;
 uint32_t maxIntervalMs          = 1200;
 float boostLevel                = 0.0f;
 
-// Field mirror from Echo Grid (closed-loop telemetry)
 float fieldEntropy              = 0.0f;
 int   fieldTracks               = 0;
 float fieldMotion               = 0.0f;
@@ -47,6 +51,7 @@ bool  hasFieldMirror            = false;
 float latestRealCSI[32];
 float prevCSI[32];
 bool hasNewCSI = false;
+bool csiHardwareOk = false;
 
 float bandMovement[4] = {0};
 float movementIntensity = 0.0;
@@ -60,7 +65,9 @@ WiFiUDP udpCsi;
 WiFiUDP udpCmd;
 unsigned long lastSendTime = 0;
 unsigned long lastUiTime = 0;
+unsigned long lastWifiAttempt = 0;
 bool wifiConnected = false;
+bool portalTried = false;
 int packetCount = 0;
 int cmdCount = 0;
 
@@ -72,7 +79,6 @@ const char* currentBandLabel() {
 }
 
 #if HAS_DISPLAY
-// ---- palette ----
 const uint16_t COL_BG     = 0x0841;
 const uint16_t COL_PANEL  = 0x1082;
 const uint16_t COL_CYAN   = 0x07FF;
@@ -95,10 +101,9 @@ void initDisplay() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
   tft.init();
-  tft.setRotation(1);  // landscape 320x240
+  tft.setRotation(1);
   tft.fillScreen(COL_BG);
 
-  // Header
   tft.fillRect(0, 0, 320, 22, COL_PANEL);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COL_CYAN, COL_PANEL);
@@ -108,18 +113,11 @@ void initDisplay() {
   tft.setTextColor(COL_DIM, COL_PANEL);
   tft.drawString("CYD", 290, 6, 1);
 
-  // Row 1: motion | boost | rate
   drawRoundPanel(2, 24, 156, 40, COL_PANEL);
   drawRoundPanel(162, 24, 76, 40, COL_PANEL);
   drawRoundPanel(242, 24, 76, 40, COL_PANEL);
-
-  // Row 2: status chips
   drawRoundPanel(2, 66, 316, 22, COL_PANEL);
-
-  // Row 3: field mirror (primary)
   drawRoundPanel(2, 90, 316, 48, COL_PANEL);
-
-  // Row 4: spectrum (maximized)
   drawRoundPanel(2, 140, 316, 98, COL_PANEL);
 
   tft.setTextColor(COL_DIM, COL_PANEL);
@@ -168,13 +166,12 @@ void drawStatusChips() {
   uint16_t wc = wifiConnected ? COL_GREEN : COL_RED;
   tft.fillRoundRect(6, 68, 48, 16, 3, wc);
   tft.setTextColor(COL_BG, wc);
-  tft.drawString(wifiConnected ? "WiFi" : "--", 12, 71, 1);
+  tft.drawString(wifiConnected ? "WiFi" : "OFF", 12, 71, 1);
 
-  // band + channel
   tft.fillRoundRect(58, 68, 56, 16, 3, COL_BAR_BG);
   tft.setTextColor(COL_YELLOW, COL_BAR_BG);
   char bb[12];
-  snprintf(bb, sizeof(bb), "%s/%d", currentBandLabel(), wifiConnected ? WiFi.channel() : 0);
+  snprintf(bb, sizeof(bb), "%s/%d", currentBandLabel(), WiFi.channel());
   tft.drawString(bb, 62, 71, 1);
 
   tft.fillRoundRect(118, 68, 52, 16, 3, COL_BAR_BG);
@@ -195,7 +192,6 @@ void drawStatusChips() {
   snprintf(pb, sizeof(pb), "p%d", packetCount % 1000);
   tft.drawString(pb, 240, 71, 1);
 
-  // agree badge
   uint16_t ac = (hasFieldMirror && fieldAgreed) ? COL_GREEN : COL_DIM;
   tft.fillRoundRect(280, 68, 34, 16, 3, ac);
   tft.setTextColor(COL_BG, ac);
@@ -205,20 +201,23 @@ void drawStatusChips() {
 void drawFieldMirror() {
   tft.fillRect(6, 102, 308, 32, COL_PANEL);
 
+  if (!wifiConnected) {
+    tft.setTextColor(COL_YELLOW, COL_PANEL);
+    tft.drawString("CSI live offline — joining LAN in background", 8, 110, 1);
+    return;
+  }
   if (!hasFieldMirror) {
     tft.setTextColor(COL_DIM, COL_PANEL);
     tft.drawString("waiting Echo Grid host on :4211...", 8, 110, 1);
     return;
   }
 
-  // Line 1: entropy + tracks + df
   tft.setTextColor(COL_CYAN, COL_PANEL);
   char l1[56];
   snprintf(l1, sizeof(l1), "H %.2f   T %d   |df| %.0f Hz",
            fieldEntropy, fieldTracks, fieldDfMax);
   tft.drawString(l1, 8, 102, 1);
 
-  // Line 2: fuse meta + host motion
   tft.setTextColor(COL_YELLOW, COL_PANEL);
   char l2[56];
   snprintf(l2, sizeof(l2), "nodes %d  bands %d  host-mot %.2f  %s",
@@ -226,14 +225,12 @@ void drawFieldMirror() {
            fieldAgreed ? "AGREED" : "single");
   tft.drawString(l2, 8, 116, 1);
 
-  // entropy bar right
   int bw = 50, bh = 10, bx = 262, by = 104;
   tft.fillRect(bx, by, bw, bh, COL_BAR_BG);
   int f = (int)(constrain(fieldEntropy * 2.0f, 0.0f, 1.0f) * (bw - 2));
   if (f > 0) tft.fillRect(bx + 1, by + 1, f, bh - 2,
                           fieldTracks > 0 ? COL_ORANGE : COL_CYAN);
 
-  // mini track dots
   for (int i = 0; i < 6; i++) {
     uint16_t dc = (i < fieldTracks) ? COL_ORANGE : COL_BAR_BG;
     tft.fillCircle(268 + i * 8, 124, 3, dc);
@@ -273,7 +270,6 @@ void drawSpectrum() {
     tft.drawFastHLine(x, baseY - h, barW, COL_WHITE);
   }
 
-  // subcarrier index ticks
   tft.setTextColor(COL_DIM, COL_PANEL);
   tft.drawString("0", 10, 232, 1);
   tft.drawString("16", 150, 232, 1);
@@ -345,6 +341,7 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
 }
 
 bool initRealCSI() {
+  // Radio stack must be up; association is NOT required.
   if (esp_wifi_set_promiscuous(true) != ESP_OK) return false;
   wifi_csi_config_t cfg = {};
   cfg.lltf_en = true;
@@ -359,22 +356,83 @@ bool initRealCSI() {
     latestRealCSI[i] = 0.3f;
     prevCSI[i] = 0.3f;
   }
-  Serial.println("[CSI] hardware OK");
+  Serial.println("[CSI] hardware OK (independent of STA join)");
   return true;
 }
 
-void connectWiFi() {
+bool trySavedWifi(uint32_t timeoutMs) {
+  // Use credentials already stored by WiFiManager / NVS if present.
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin();  // empty begin uses last saved STA config when available
+
+  uint32_t start = millis();
+  while (millis() - start < timeoutMs) {
+    wl_status_t st = WiFi.status();
+    if (st == WL_CONNECTED) {
+      wifiConnected = true;
+      statusLed(true);
+      Serial.print("[WiFi] joined ");
+      Serial.println(WiFi.localIP());
+      return true;
+    }
+    delay(100);
+  }
+  wifiConnected = false;
+  statusLed(false);
+  Serial.println("[WiFi] no saved join yet — CSI stays live, retrying in background");
+  return false;
+}
+
+void openConfigPortalOnce() {
+  if (portalTried) return;
+  portalTried = true;
+  Serial.println("[WiFi] opening config portal (optional; CSI already running)");
+
   WiFiManager wifiManager;
-  wifiManager.setConfigPortalTimeout(180);
+  wifiManager.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
+  wifiManager.setConnectTimeout(20);
   String apName = String("ESP32-CSI-") + NODE_ID;
-  if (wifiManager.autoConnect(apName.c_str())) {
-    wifiConnected = true;
-    statusLed(true);
-    Serial.print("[WiFi] ");
-    Serial.println(WiFi.localIP());
+
+  // Do not restart on failure — sensing must keep running.
+  if (wifiManager.startConfigPortal(apName.c_str())) {
+    wifiConnected = (WiFi.status() == WL_CONNECTED);
+    if (wifiConnected) {
+      statusLed(true);
+      Serial.print("[WiFi] portal saved / joined ");
+      Serial.println(WiFi.localIP());
+    }
   } else {
-    Serial.println("[WiFi] failed");
+    Serial.println("[WiFi] portal closed without join — continue offline CSI");
+    wifiConnected = false;
+  }
+}
+
+void maintainWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiConnected) {
+      wifiConnected = true;
+      statusLed(true);
+      Serial.print("[WiFi] (re)connected ");
+      Serial.println(WiFi.localIP());
+    }
+    return;
+  }
+
+  if (wifiConnected) {
+    wifiConnected = false;
+    statusLed(false);
+    Serial.println("[WiFi] link lost — CSI continues offline");
+  }
+
+  unsigned long now = millis();
+  if (now - lastWifiAttempt < WIFI_RECONNECT_MS) return;
+  lastWifiAttempt = now;
+
+  // Background reconnect using saved credentials. Portal only once if never joined.
+  if (!trySavedWifi(3000) && !portalTried) {
+    // First boot with empty credentials: offer portal once, non-fatal.
+    openConfigPortalOnce();
   }
 }
 
@@ -421,12 +479,17 @@ void pollCommands() {
 }
 
 void sendCSIPacket() {
-  if (!wifiConnected) return;
-  float rssi = WiFi.RSSI();
+  // Always update local features / display path; only UDP needs link.
+  float rssi = wifiConnected ? WiFi.RSSI() : -100.0f;
   if (!hasNewCSI) {
     for (int i = 0; i < 32; i++)
       latestRealCSI[i] = 0.35f + (random(30) / 100.0f);
     updateRichCSIFeatures();
+  }
+
+  if (!wifiConnected) {
+    hasNewCSI = false;
+    return;
   }
 
   StaticJsonDocument<1600> doc;
@@ -471,7 +534,7 @@ void sendCSIPacket() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("=== ESP32 CSI + CYD max display ===");
+  Serial.println("=== ESP32 CSI (sensing first, WiFi second) ===");
   Serial.printf("NODE_ID=%s  CSI:%u  CMD:%u  DISPLAY=%d\n",
                 NODE_ID, CSI_PORT, CMD_PORT, HAS_DISPLAY);
 
@@ -482,24 +545,35 @@ void setup() {
   statusLed(false);
 #endif
 
+  // 1) Radio stack up
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   delay(50);
-  connectWiFi();
 
-  if (USE_REAL_CSI && !initRealCSI()) {
-    Serial.println("[CSI] soft fallback");
+  // 2) CSI immediately — does not wait for host LAN
+  if (USE_REAL_CSI) {
+    csiHardwareOk = initRealCSI();
+    if (!csiHardwareOk) Serial.println("[CSI] soft fallback");
   }
 
+  // 3) UDP sockets ready even before join (binds local ports)
   udpCsi.begin(4212);
   udpCmd.begin(CMD_PORT);
+
+  // 4) Best-effort quick join; never blocks sensing forever
+  lastWifiAttempt = millis();
+  trySavedWifi(WIFI_CONNECT_TIMEOUT_MS);
 
 #if HAS_DISPLAY
   updateDisplay();
 #endif
+  Serial.println("[boot] CSI path live; WiFi maintained in background");
 }
 
 void loop() {
+  maintainWifi();
   pollCommands();
+
   if (millis() - lastSendTime >= sendIntervalMs) {
     sendCSIPacket();
     lastSendTime = millis();
