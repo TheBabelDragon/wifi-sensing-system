@@ -6,6 +6,7 @@
 #include <esp_wifi.h>
 #include <esp_wifi_types.h>
 #include <cmath>
+#include <cstring>
 
 #ifndef HAS_DISPLAY
 #define HAS_DISPLAY 0
@@ -29,10 +30,13 @@ const char* NODE_ID             = NODE_ID_STR;
 const int STATUS_LED_PIN        = 2;
 const bool USE_REAL_CSI         = true;
 
-// WiFi policy: sensing must NOT wait on host LAN join.
-const uint32_t WIFI_CONNECT_TIMEOUT_MS = 12000;
-const uint32_t WIFI_RECONNECT_MS       = 15000;
-const uint32_t WIFI_PORTAL_TIMEOUT_S   = 90;
+// Offline sensing channel — both virgin and disconnected nodes use this so
+// promiscuous CSI is not left floating on random scan channels.
+const uint8_t OFFLINE_CSI_CHANNEL = 6;
+
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 10000;
+const uint32_t WIFI_RECONNECT_MS       = 20000;
+const uint32_t WIFI_PORTAL_TIMEOUT_S   = 120;
 
 uint32_t sendIntervalMs         = 450;
 uint32_t minIntervalMs          = 120;
@@ -67,7 +71,7 @@ unsigned long lastSendTime = 0;
 unsigned long lastUiTime = 0;
 unsigned long lastWifiAttempt = 0;
 bool wifiConnected = false;
-bool portalTried = false;
+bool hasStaCredentials = false;
 int packetCount = 0;
 int cmdCount = 0;
 
@@ -76,6 +80,23 @@ const char* currentBandLabel() {
   if (ch >= 1 && ch <= 14) return "2.4";
   if (ch >= 36) return "5";
   return "2.4";
+}
+
+bool staCredentialsSaved() {
+  wifi_config_t cfg;
+  memset(&cfg, 0, sizeof(cfg));
+  if (esp_wifi_get_config(WIFI_IF_STA, &cfg) != ESP_OK) return false;
+  return cfg.sta.ssid[0] != 0;
+}
+
+void lockOfflineChannel() {
+  // Keep unassociated nodes on a fixed channel so CSI isn't scan-hopping.
+  esp_err_t err = esp_wifi_set_channel(OFFLINE_CSI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (err == ESP_OK) {
+    Serial.printf("[CSI] offline channel locked → %u\n", OFFLINE_CSI_CHANNEL);
+  } else {
+    Serial.printf("[CSI] channel lock failed (%d)\n", (int)err);
+  }
 }
 
 #if HAS_DISPLAY
@@ -163,10 +184,10 @@ void drawRate() {
 void drawStatusChips() {
   tft.fillRect(6, 68, 308, 18, COL_PANEL);
 
-  uint16_t wc = wifiConnected ? COL_GREEN : COL_RED;
+  uint16_t wc = wifiConnected ? COL_GREEN : COL_YELLOW;
   tft.fillRoundRect(6, 68, 48, 16, 3, wc);
   tft.setTextColor(COL_BG, wc);
-  tft.drawString(wifiConnected ? "WiFi" : "OFF", 12, 71, 1);
+  tft.drawString(wifiConnected ? "WiFi" : "LOC", 12, 71, 1);
 
   tft.fillRoundRect(58, 68, 56, 16, 3, COL_BAR_BG);
   tft.setTextColor(COL_YELLOW, COL_BAR_BG);
@@ -203,7 +224,11 @@ void drawFieldMirror() {
 
   if (!wifiConnected) {
     tft.setTextColor(COL_YELLOW, COL_PANEL);
-    tft.drawString("CSI live offline — joining LAN in background", 8, 110, 1);
+    if (hasStaCredentials) {
+      tft.drawString("CSI local — reconnecting saved WiFi…", 8, 110, 1);
+    } else {
+      tft.drawString("CSI local — serial: portal  (no creds)", 8, 110, 1);
+    }
     return;
   }
   if (!hasFieldMirror) {
@@ -341,7 +366,6 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
 }
 
 bool initRealCSI() {
-  // Radio stack must be up; association is NOT required.
   if (esp_wifi_set_promiscuous(true) != ESP_OK) return false;
   wifi_csi_config_t cfg = {};
   cfg.lltf_en = true;
@@ -361,50 +385,64 @@ bool initRealCSI() {
 }
 
 bool trySavedWifi(uint32_t timeoutMs) {
-  // Use credentials already stored by WiFiManager / NVS if present.
+  if (!hasStaCredentials) {
+    Serial.println("[WiFi] no saved STA creds — stay local CSI (channel locked)");
+    lockOfflineChannel();
+    wifiConnected = false;
+    return false;
+  }
+
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFi.begin();  // empty begin uses last saved STA config when available
+  WiFi.begin();  // uses NVS STA config
 
   uint32_t start = millis();
   while (millis() - start < timeoutMs) {
-    wl_status_t st = WiFi.status();
-    if (st == WL_CONNECTED) {
+    if (WiFi.status() == WL_CONNECTED) {
       wifiConnected = true;
       statusLed(true);
       Serial.print("[WiFi] joined ");
-      Serial.println(WiFi.localIP());
+      Serial.print(WiFi.localIP());
+      Serial.printf("  ch=%d\n", WiFi.channel());
       return true;
     }
     delay(100);
   }
+
   wifiConnected = false;
   statusLed(false);
-  Serial.println("[WiFi] no saved join yet — CSI stays live, retrying in background");
+  lockOfflineChannel();
+  Serial.println("[WiFi] saved join timed out — local CSI on offline channel");
   return false;
 }
 
-void openConfigPortalOnce() {
-  if (portalTried) return;
-  portalTried = true;
-  Serial.println("[WiFi] opening config portal (optional; CSI already running)");
-
+void openConfigPortal() {
+  Serial.println("[WiFi] portal requested (CSI keeps running after exit)");
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
   wifiManager.setConnectTimeout(20);
   String apName = String("ESP32-CSI-") + NODE_ID;
 
-  // Do not restart on failure — sensing must keep running.
-  if (wifiManager.startConfigPortal(apName.c_str())) {
-    wifiConnected = (WiFi.status() == WL_CONNECTED);
-    if (wifiConnected) {
-      statusLed(true);
-      Serial.print("[WiFi] portal saved / joined ");
-      Serial.println(WiFi.localIP());
-    }
+  bool ok = wifiManager.startConfigPortal(apName.c_str());
+  hasStaCredentials = staCredentialsSaved();
+
+  if (ok && WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    statusLed(true);
+    Serial.print("[WiFi] portal joined ");
+    Serial.println(WiFi.localIP());
   } else {
-    Serial.println("[WiFi] portal closed without join — continue offline CSI");
     wifiConnected = false;
+    statusLed(false);
+    // Restore sensing-friendly radio after portal AP mode.
+    WiFi.mode(WIFI_STA);
+    delay(50);
+    if (csiHardwareOk) {
+      esp_wifi_set_promiscuous(true);
+      esp_wifi_set_csi(true);
+    }
+    lockOfflineChannel();
+    Serial.println("[WiFi] portal done — local CSI restored");
   }
 }
 
@@ -414,7 +452,7 @@ void maintainWifi() {
       wifiConnected = true;
       statusLed(true);
       Serial.print("[WiFi] (re)connected ");
-      Serial.println(WiFi.localIP());
+      Serial.printf("%s ch=%d\n", WiFi.localIP().toString().c_str(), WiFi.channel());
     }
     return;
   }
@@ -422,17 +460,31 @@ void maintainWifi() {
   if (wifiConnected) {
     wifiConnected = false;
     statusLed(false);
-    Serial.println("[WiFi] link lost — CSI continues offline");
+    lockOfflineChannel();
+    Serial.println("[WiFi] link lost — local CSI on offline channel");
   }
+
+  // Virgin nodes: do nothing (no portal auto). Provisioned: retry join.
+  if (!hasStaCredentials) return;
 
   unsigned long now = millis();
   if (now - lastWifiAttempt < WIFI_RECONNECT_MS) return;
   lastWifiAttempt = now;
+  trySavedWifi(4000);
+}
 
-  // Background reconnect using saved credentials. Portal only once if never joined.
-  if (!trySavedWifi(3000) && !portalTried) {
-    // First boot with empty credentials: offer portal once, non-fatal.
-    openConfigPortalOnce();
+void pollSerialPortal() {
+  while (Serial.available()) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (line.equalsIgnoreCase("portal")) {
+      openConfigPortal();
+    } else if (line.equalsIgnoreCase("status")) {
+      Serial.printf(
+        "[status] wifi=%d creds=%d csi=%d ch=%d packets=%d\n",
+        wifiConnected, hasStaCredentials, csiHardwareOk, WiFi.channel(), packetCount
+      );
+    }
   }
 }
 
@@ -479,7 +531,6 @@ void pollCommands() {
 }
 
 void sendCSIPacket() {
-  // Always update local features / display path; only UDP needs link.
   float rssi = wifiConnected ? WiFi.RSSI() : -100.0f;
   if (!hasNewCSI) {
     for (int i = 0; i < 32; i++)
@@ -537,6 +588,7 @@ void setup() {
   Serial.println("=== ESP32 CSI (sensing first, WiFi second) ===");
   Serial.printf("NODE_ID=%s  CSI:%u  CMD:%u  DISPLAY=%d\n",
                 NODE_ID, CSI_PORT, CMD_PORT, HAS_DISPLAY);
+  Serial.println("serial cmds:  portal | status");
 
 #if HAS_DISPLAY
   initDisplay();
@@ -545,32 +597,42 @@ void setup() {
   statusLed(false);
 #endif
 
-  // 1) Radio stack up
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   delay(50);
 
-  // 2) CSI immediately — does not wait for host LAN
+  hasStaCredentials = staCredentialsSaved();
+  Serial.printf("[WiFi] saved STA creds: %s\n", hasStaCredentials ? "yes" : "no");
+
+  // CSI first, same path for virgin + provisioned.
   if (USE_REAL_CSI) {
     csiHardwareOk = initRealCSI();
     if (!csiHardwareOk) Serial.println("[CSI] soft fallback");
   }
 
-  // 3) UDP sockets ready even before join (binds local ports)
+  // Same offline baseline for any node not yet associated.
+  if (WiFi.status() != WL_CONNECTED) {
+    lockOfflineChannel();
+  }
+
   udpCsi.begin(4212);
   udpCmd.begin(CMD_PORT);
 
-  // 4) Best-effort quick join; never blocks sensing forever
   lastWifiAttempt = millis();
-  trySavedWifi(WIFI_CONNECT_TIMEOUT_MS);
+  if (hasStaCredentials) {
+    trySavedWifi(WIFI_CONNECT_TIMEOUT_MS);
+  } else {
+    Serial.println("[WiFi] virgin node — local CSI only until 'portal'");
+  }
 
 #if HAS_DISPLAY
   updateDisplay();
 #endif
-  Serial.println("[boot] CSI path live; WiFi maintained in background");
+  Serial.println("[boot] CSI path live");
 }
 
 void loop() {
+  pollSerialPortal();
   maintainWifi();
   pollCommands();
 
