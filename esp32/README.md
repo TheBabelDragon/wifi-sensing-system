@@ -1,29 +1,31 @@
-# ESP32 CSI nodes (closed-loop)
+# ESP32 CSI nodes (closed-loop + ESP-NOW)
 
-| Direction | Port | Role |
-|-----------|------|------|
-| out | **4210** | CSI JSON broadcast → Echo Grid |
-| in | **4211** | `echo_cmd` from Echo Grid |
+| Direction | Port / Path | Role |
+|-----------|-------------|------|
+| out | **4210** (UDP) | Full CSI JSON → Echo Grid (when WiFi joined) |
+| out | **ESP-NOW** | Compact CSI broadcast (always, all nodes) |
+| in | **4211** (UDP) | `echo_cmd` from Echo Grid |
 
 ## Boot policy
 
-**Sensing first. Same local path for virgin and provisioned nodes.**
+**Sensing first. ESP-NOW always on. WiFi optional.**
 
 1. `WIFI_STA` + hardware CSI start immediately  
-2. If not associated → lock **channel 6** (stable promiscuous CSI)  
-3. If NVS has saved STA creds → background join home AP  
-4. If virgin (no creds) → stay local; **no auto portal**  
-5. Portal only when you ask: serial `portal`  
-6. UDP to Echo only while associated  
+2. ESP-NOW initialized on every node (broadcast CSI)  
+3. If not associated → lock **channel 6** (stable promiscuous CSI + ESP-NOW)  
+4. If NVS has saved STA creds → background join home AP  
+5. If virgin (no creds) → stay local; **no auto portal**  
+6. Portal only when you ask: serial `portal`  
+7. Full UDP JSON only while associated; ESP-NOW works with or without WiFi  
+8. Any node that *is* on WiFi acts as a **soft gateway** (forwards peer ESP-NOW CSI → UDP)
 
-Provisioned vs virgin no longer differ by “stuck in portal / scan hop.”  
-They only differ by uplink (UDP) and AP channel once joined.
+No host failsafe. CSI and ESP-NOW keep running even if the Echo Grid host is down.
 
 ## Serial commands
 
 ```
 portal   # open WiFiManager AP once, save home Wi‑Fi
-status   # wifi/creds/csi/channel/packets
+status   # wifi/creds/csi/espnow/channel/packet counts
 ```
 
 ## Boards
@@ -95,10 +97,17 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ## First credentials (virgin node)
 
-1. Flash and boot — CSI starts immediately (channel 6 if not associated)
+1. Flash and boot — CSI + ESP-NOW already live (channel 6)
 2. Open serial monitor and type `portal`
-3. Join the temporary AP `ESP32-CSI-<node>` and set home Wi-Fi + Echo Grid host IP
-4. Node must be on the same LAN as the Echo Grid host for UDP (ports 4210/4211)
+3. Join the temporary AP `ESP32-CSI-<node>` and set home Wi-Fi
+4. After join, the node can bridge peer ESP-NOW traffic to the host via UDP
+
+## How the hybrid works
+
+- **Every node** broadcasts compact CSI over ESP-NOW (no WiFi required).
+- **Any node that has joined WiFi** also sends full JSON on UDP :4210 and forwards ESP-NOW packets it hears from peers.
+- So one provisioned node is enough to get the whole swarm into Echo Grid.
+- Offline / virgin nodes still contribute via ESP-NOW to any nearby bridge.
 
 ## Echo Grid
 

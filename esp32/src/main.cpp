@@ -5,6 +5,7 @@
 #include <WiFiManager.h>
 #include <esp_wifi.h>
 #include <esp_wifi_types.h>
+#include <esp_now.h>
 #include <cmath>
 #include <cstring>
 
@@ -74,6 +75,27 @@ bool wifiConnected = false;
 bool hasStaCredentials = false;
 int packetCount = 0;
 int cmdCount = 0;
+int espNowTxCount = 0;
+int espNowRxCount = 0;
+bool espNowOk = false;
+
+// Compact ESP-NOW CSI packet (fits well under 250-byte limit)
+#pragma pack(push, 1)
+struct EspNowCsiPkt {
+  char     magic[4];   // "CSI1"
+  char     node[12];   // truncated NODE_ID
+  uint32_t ts_ms;
+  int8_t   rssi;
+  uint8_t  channel;
+  uint8_t  activity;   // 0-255
+  uint8_t  movement;   // 0-255
+  uint8_t  hot_zones;
+  uint8_t  flags;      // bit0 = obstruction
+  uint8_t  csi[32];    // scaled 0-255
+};
+#pragma pack(pop)
+
+static const uint8_t ESPNOW_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 const char* currentBandLabel() {
   int ch = WiFi.channel();
@@ -91,6 +113,7 @@ bool staCredentialsSaved() {
 
 void lockOfflineChannel() {
   // Keep unassociated nodes on a fixed channel so CSI isn't scan-hopping.
+  // ESP-NOW peers must share this channel when offline.
   esp_err_t err = esp_wifi_set_channel(OFFLINE_CSI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (err == ESP_OK) {
     Serial.printf("[CSI] offline channel locked → %u\n", OFFLINE_CSI_CHANNEL);
@@ -225,9 +248,9 @@ void drawFieldMirror() {
   if (!wifiConnected) {
     tft.setTextColor(COL_YELLOW, COL_PANEL);
     if (hasStaCredentials) {
-      tft.drawString("CSI local — reconnecting saved WiFi…", 8, 110, 1);
+      tft.drawString("CSI + ESP-NOW local — reconnecting WiFi…", 8, 110, 1);
     } else {
-      tft.drawString("CSI local — serial: portal  (no creds)", 8, 110, 1);
+      tft.drawString("CSI + ESP-NOW local — serial: portal", 8, 110, 1);
     }
     return;
   }
@@ -384,9 +407,118 @@ bool initRealCSI() {
   return true;
 }
 
+// ---------- ESP-NOW ----------
+
+void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  (void)mac_addr;
+  (void)status;
+}
+
+// When this node has WiFi, act as soft gateway: forward peer ESP-NOW CSI → UDP
+void forwardEspNowToUdp(const EspNowCsiPkt* pkt) {
+  if (!wifiConnected || !pkt) return;
+
+  StaticJsonDocument<768> doc;
+  doc["node"] = pkt->node;
+  doc["timestamp"] = pkt->ts_ms;
+  doc["rssi"] = (int)pkt->rssi;
+  doc["type"] = "wifi_csi";
+  doc["channel"] = pkt->channel;
+  doc["activity"] = pkt->activity / 255.0f;
+  doc["movement_intensity"] = pkt->movement / 255.0f;
+  doc["hot_zones"] = pkt->hot_zones;
+  doc["obstruction"] = (pkt->flags & 0x01) != 0;
+  doc["via"] = "espnow";
+  doc["bridge"] = NODE_ID;
+
+  JsonArray csiArr = doc.createNestedArray("csi");
+  for (int i = 0; i < 32; i++) {
+    csiArr.add(pkt->csi[i] / 255.0f);
+  }
+
+  char buf[768];
+  size_t n = serializeJson(doc, buf);
+
+  IPAddress bcast = WiFi.localIP();
+  bcast[3] = 255;
+  if (udpCsi.beginPacket(bcast, CSI_PORT)) {
+    udpCsi.write((uint8_t*)buf, n);
+    udpCsi.endPacket();
+  }
+  if (udpCsi.beginPacket(IPAddress(255, 255, 255, 255), CSI_PORT)) {
+    udpCsi.write((uint8_t*)buf, n);
+    udpCsi.endPacket();
+  }
+}
+
+void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+  (void)mac;
+  if (len < (int)sizeof(EspNowCsiPkt)) return;
+  const EspNowCsiPkt* pkt = (const EspNowCsiPkt*)data;
+  if (memcmp(pkt->magic, "CSI1", 4) != 0) return;
+
+  // Ignore our own broadcasts
+  if (strncmp(pkt->node, NODE_ID, sizeof(pkt->node)) == 0) return;
+
+  espNowRxCount++;
+  forwardEspNowToUdp(pkt);
+}
+
+bool initEspNow() {
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESP-NOW] init failed");
+    return false;
+  }
+  esp_now_register_send_cb(onEspNowSent);
+  esp_now_register_recv_cb(onEspNowRecv);
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, ESPNOW_BROADCAST, 6);
+  peer.channel = 0;          // use current channel
+  peer.encrypt = false;
+  peer.ifidx = WIFI_IF_STA;
+
+  // Remove first in case of re-init after portal
+  esp_now_del_peer(ESPNOW_BROADCAST);
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("[ESP-NOW] add broadcast peer failed");
+    return false;
+  }
+
+  Serial.println("[ESP-NOW] ready (broadcast CSI on all nodes)");
+  return true;
+}
+
+void sendEspNowCsi() {
+  if (!espNowOk) return;
+
+  EspNowCsiPkt pkt = {};
+  memcpy(pkt.magic, "CSI1", 4);
+  strncpy(pkt.node, NODE_ID, sizeof(pkt.node) - 1);
+  pkt.ts_ms   = millis();
+  pkt.rssi    = wifiConnected ? (int8_t)WiFi.RSSI() : (int8_t)-100;
+  pkt.channel = (uint8_t)WiFi.channel();
+  pkt.activity = (uint8_t)constrain((int)(activityLevel * 255.0f), 0, 255);
+  pkt.movement = (uint8_t)constrain((int)(movementIntensity * 255.0f), 0, 255);
+  pkt.hot_zones = (uint8_t)hotZoneCount;
+  pkt.flags = significantObstruction ? 0x01 : 0x00;
+
+  for (int i = 0; i < 32; i++) {
+    float v = latestRealCSI[i];
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    pkt.csi[i] = (uint8_t)(v * 255.0f);
+  }
+
+  esp_err_t err = esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&pkt, sizeof(pkt));
+  if (err == ESP_OK) {
+    espNowTxCount++;
+  }
+}
+
 bool trySavedWifi(uint32_t timeoutMs) {
   if (!hasStaCredentials) {
-    Serial.println("[WiFi] no saved STA creds — stay local CSI (channel locked)");
+    Serial.println("[WiFi] no saved STA creds — CSI + ESP-NOW local (channel locked)");
     lockOfflineChannel();
     wifiConnected = false;
     return false;
@@ -412,8 +544,20 @@ bool trySavedWifi(uint32_t timeoutMs) {
   wifiConnected = false;
   statusLed(false);
   lockOfflineChannel();
-  Serial.println("[WiFi] saved join timed out — local CSI on offline channel");
+  Serial.println("[WiFi] saved join timed out — CSI + ESP-NOW on offline channel");
   return false;
+}
+
+void restoreRadioAfterPortal() {
+  WiFi.mode(WIFI_STA);
+  delay(50);
+  if (csiHardwareOk) {
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_csi(true);
+  }
+  lockOfflineChannel();
+  // Re-init ESP-NOW (portal can tear radio state down)
+  espNowOk = initEspNow();
 }
 
 void openConfigPortal() {
@@ -431,18 +575,13 @@ void openConfigPortal() {
     statusLed(true);
     Serial.print("[WiFi] portal joined ");
     Serial.println(WiFi.localIP());
+    // Re-init ESP-NOW on the new channel
+    espNowOk = initEspNow();
   } else {
     wifiConnected = false;
     statusLed(false);
-    // Restore sensing-friendly radio after portal AP mode.
-    WiFi.mode(WIFI_STA);
-    delay(50);
-    if (csiHardwareOk) {
-      esp_wifi_set_promiscuous(true);
-      esp_wifi_set_csi(true);
-    }
-    lockOfflineChannel();
-    Serial.println("[WiFi] portal done — local CSI restored");
+    restoreRadioAfterPortal();
+    Serial.println("[WiFi] portal done — CSI + ESP-NOW restored");
   }
 }
 
@@ -453,6 +592,8 @@ void maintainWifi() {
       statusLed(true);
       Serial.print("[WiFi] (re)connected ");
       Serial.printf("%s ch=%d\n", WiFi.localIP().toString().c_str(), WiFi.channel());
+      // Channel may have changed — refresh ESP-NOW peer
+      espNowOk = initEspNow();
     }
     return;
   }
@@ -461,7 +602,8 @@ void maintainWifi() {
     wifiConnected = false;
     statusLed(false);
     lockOfflineChannel();
-    Serial.println("[WiFi] link lost — local CSI on offline channel");
+    espNowOk = initEspNow();
+    Serial.println("[WiFi] link lost — CSI + ESP-NOW on offline channel");
   }
 
   // Virgin nodes: do nothing (no portal auto). Provisioned: retry join.
@@ -481,8 +623,9 @@ void pollSerialPortal() {
       openConfigPortal();
     } else if (line.equalsIgnoreCase("status")) {
       Serial.printf(
-        "[status] wifi=%d creds=%d csi=%d ch=%d packets=%d\n",
-        wifiConnected, hasStaCredentials, csiHardwareOk, WiFi.channel(), packetCount
+        "[status] wifi=%d creds=%d csi=%d espnow=%d ch=%d udp_pkts=%d en_tx=%d en_rx=%d\n",
+        wifiConnected, hasStaCredentials, csiHardwareOk, espNowOk,
+        WiFi.channel(), packetCount, espNowTxCount, espNowRxCount
       );
     }
   }
@@ -530,18 +673,10 @@ void pollCommands() {
   }
 }
 
-void sendCSIPacket() {
-  float rssi = wifiConnected ? WiFi.RSSI() : -100.0f;
-  if (!hasNewCSI) {
-    for (int i = 0; i < 32; i++)
-      latestRealCSI[i] = 0.35f + (random(30) / 100.0f);
-    updateRichCSIFeatures();
-  }
+void sendUdpCsi() {
+  if (!wifiConnected) return;
 
-  if (!wifiConnected) {
-    hasNewCSI = false;
-    return;
-  }
+  float rssi = WiFi.RSSI();
 
   StaticJsonDocument<1600> doc;
   doc["node"] = NODE_ID;
@@ -558,6 +693,7 @@ void sendCSIPacket() {
   doc["interval_ms"] = sendIntervalMs;
   doc["boost"] = boostLevel;
   doc["cmd_count"] = cmdCount;
+  doc["via"] = "udp";
 
   JsonArray bandMov = doc.createNestedArray("band_movement");
   for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
@@ -579,13 +715,28 @@ void sendCSIPacket() {
   }
 
   packetCount++;
+}
+
+void sendCSIPacket() {
+  if (!hasNewCSI) {
+    for (int i = 0; i < 32; i++)
+      latestRealCSI[i] = 0.35f + (random(30) / 100.0f);
+    updateRichCSIFeatures();
+  }
+
+  // Always try ESP-NOW (works with or without WiFi)
+  sendEspNowCsi();
+
+  // Full rich JSON only when on WiFi
+  sendUdpCsi();
+
   hasNewCSI = false;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("=== ESP32 CSI (sensing first, WiFi second) ===");
+  Serial.println("=== ESP32 CSI (sensing first + ESP-NOW) ===");
   Serial.printf("NODE_ID=%s  CSI:%u  CMD:%u  DISPLAY=%d\n",
                 NODE_ID, CSI_PORT, CMD_PORT, HAS_DISPLAY);
   Serial.println("serial cmds:  portal | status");
@@ -615,20 +766,25 @@ void setup() {
     lockOfflineChannel();
   }
 
+  // ESP-NOW on every node (works offline on ch6 or on home AP channel)
+  espNowOk = initEspNow();
+
   udpCsi.begin(4212);
   udpCmd.begin(CMD_PORT);
 
   lastWifiAttempt = millis();
   if (hasStaCredentials) {
     trySavedWifi(WIFI_CONNECT_TIMEOUT_MS);
+    // Channel may have changed after join
+    if (wifiConnected) espNowOk = initEspNow();
   } else {
-    Serial.println("[WiFi] virgin node — local CSI only until 'portal'");
+    Serial.println("[WiFi] virgin — CSI + ESP-NOW local until 'portal'");
   }
 
 #if HAS_DISPLAY
   updateDisplay();
 #endif
-  Serial.println("[boot] CSI path live");
+  Serial.println("[boot] CSI + ESP-NOW path live");
 }
 
 void loop() {
