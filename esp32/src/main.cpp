@@ -38,7 +38,6 @@ const uint8_t OFFLINE_CSI_CHANNEL = 6;
 const uint32_t WIFI_CONNECT_TIMEOUT_MS = 10000;
 const uint32_t WIFI_RECONNECT_MS       = 20000;
 const uint32_t WIFI_PORTAL_TIMEOUT_S   = 180;
-const uint32_t HEARTBEAT_MS            = 10000;
 
 uint32_t sendIntervalMs         = 450;
 uint32_t minIntervalMs          = 120;
@@ -75,7 +74,6 @@ WiFiUDP udpCmd;
 unsigned long lastSendTime = 0;
 unsigned long lastUiTime = 0;
 unsigned long lastWifiAttempt = 0;
-unsigned long lastHeartbeat = 0;
 bool wifiConnected = false;
 bool hasStaCredentials = false;
 int packetCount = 0;
@@ -106,7 +104,7 @@ struct EspNowCsiPkt {
 
 static const uint8_t ESPNOW_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// Deferred ESP-NOW RX (keep ISR/callback light)
+// Deferred ESP-NOW RX (keep callback light)
 volatile bool espNowRxPending = false;
 EspNowCsiPkt  espNowRxPkt;
 
@@ -438,7 +436,7 @@ void pauseRadioForPortal() {
     esp_now_deinit();
     espNowOk = false;
   }
-  delay(20);
+  delay(30);
 }
 
 // ---------- ESP-NOW ----------
@@ -456,14 +454,12 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
   if (memcmp(pkt->magic, "CSI1", 4) != 0) return;
   if (strncmp(pkt->node, NODE_ID, sizeof(pkt->node)) == 0) return;
 
-  // Copy once; process in loop (keeps callback light)
   memcpy(&espNowRxPkt, pkt, sizeof(EspNowCsiPkt));
   espNowRxPending = true;
   espNowRxCount++;
 }
 
 bool initEspNow() {
-  // Safe re-init
   esp_now_deinit();
   delay(10);
 
@@ -605,7 +601,9 @@ void restoreRadioAfterPortal() {
 }
 
 void openConfigPortal() {
-  Serial.println("[WiFi] opening portal — type will appear as AP ESP32-CSI-...");
+  Serial.println();
+  Serial.println("[WiFi] >>> OPENING PORTAL <<<");
+  Serial.println("[WiFi] Join AP: ESP32-CSI-<node>  then set house WiFi");
   Serial.flush();
 
   // Must stop CSI/promiscuous/ESP-NOW or WiFiManager AP is unreliable
@@ -614,7 +612,7 @@ void openConfigPortal() {
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
   wifiManager.setConnectTimeout(20);
-  wifiManager.setDebugOutput(true);
+  wifiManager.setDebugOutput(false);  // keep serial quiet
   String apName = String("ESP32-CSI-") + NODE_ID;
 
   bool ok = wifiManager.startConfigPortal(apName.c_str());
@@ -669,23 +667,27 @@ void maintainWifi() {
   trySavedWifi(4000);
 }
 
+void printStatus() {
+  Serial.printf(
+    "[status] wifi=%d creds=%d csi=%d espnow=%d ch=%d "
+    "udp=%d en_tx=%d en_rx=%d csi_irq=%lu\n",
+    wifiConnected, hasStaCredentials, csiHardwareOk, espNowOk,
+    WiFi.channel(), packetCount, espNowTxCount, espNowRxCount,
+    (unsigned long)csiIrqCount
+  );
+}
+
 void handleSerialLine(const char* line) {
   if (strcasecmp(line, "portal") == 0) {
     openConfigPortal();
   } else if (strcasecmp(line, "status") == 0) {
-    Serial.printf(
-      "[status] wifi=%d creds=%d csi=%d espnow=%d ch=%d "
-      "udp=%d en_tx=%d en_rx=%d csi_irq=%lu\n",
-      wifiConnected, hasStaCredentials, csiHardwareOk, espNowOk,
-      WiFi.channel(), packetCount, espNowTxCount, espNowRxCount,
-      (unsigned long)csiIrqCount
-    );
+    printStatus();
   } else if (line[0]) {
-    Serial.printf("[serial] unknown cmd '%s' (try: portal | status)\n", line);
+    Serial.printf("[serial] unknown '%s' — try: portal | status\n", line);
   }
 }
 
-// Fully non-blocking serial — never uses readStringUntil
+// Fully non-blocking serial
 void pollSerial() {
   while (Serial.available()) {
     char c = (char)Serial.read();
@@ -697,7 +699,7 @@ void pollSerial() {
     } else if (serialLen + 1 < sizeof(serialBuf)) {
       serialBuf[serialLen++] = c;
     } else {
-      serialLen = 0; // overflow — reset
+      serialLen = 0;
     }
   }
 }
@@ -788,8 +790,7 @@ void sendUdpCsi() {
 
 void sendCSIPacket() {
   consumeNewCsi();
-  if (!hasNewCSI && csiIrqCount == 0) {
-    // Soft synthetic samples only if hardware never produced any
+  if (csiIrqCount == 0) {
     for (int i = 0; i < 32; i++)
       latestRealCSI[i] = 0.35f + (random(30) / 100.0f);
     updateRichCSIFeatures();
@@ -801,12 +802,13 @@ void sendCSIPacket() {
 
 void setup() {
   Serial.begin(115200);
-  delay(400);
+  delay(500);
   Serial.println();
   Serial.println("=== ESP32 CSI (sensing first + ESP-NOW) ===");
   Serial.printf("NODE_ID=%s  CSI:%u  CMD:%u  DISPLAY=%d\n",
                 NODE_ID, CSI_PORT, CMD_PORT, HAS_DISPLAY);
-  Serial.println("serial cmds:  portal | status");
+  Serial.println("Commands:  portal   |   status");
+  Serial.println("(serial is quiet on purpose — type a command anytime)");
   Serial.flush();
 
 #if HAS_DISPLAY
@@ -838,25 +840,24 @@ void setup() {
   udpCmd.begin(CMD_PORT);
 
   lastWifiAttempt = millis();
-  lastHeartbeat = millis();
   lastSendTime = millis();
 
   if (hasStaCredentials) {
     trySavedWifi(WIFI_CONNECT_TIMEOUT_MS);
     if (wifiConnected) espNowOk = initEspNow();
   } else {
-    Serial.println("[WiFi] virgin — type 'portal' to join house WiFi");
+    Serial.println("[WiFi] virgin node — type: portal");
   }
 
 #if HAS_DISPLAY
   updateDisplay();
 #endif
-  Serial.println("[boot] live — waiting for serial (portal | status)");
+  Serial.println("[boot] ready");
   Serial.flush();
 }
 
 void loop() {
-  // Serial first so portal/status always respond even under load
+  // Serial first so portal/status always respond
   pollSerial();
   processEspNowRx();
   maintainWifi();
@@ -867,13 +868,6 @@ void loop() {
   if (now - lastSendTime >= sendIntervalMs) {
     sendCSIPacket();
     lastSendTime = now;
-  }
-
-  if (now - lastHeartbeat >= HEARTBEAT_MS) {
-    lastHeartbeat = now;
-    Serial.printf("[hb] up=%lus wifi=%d espnow=%d csi_irq=%lu en_tx=%d\n",
-                  now / 1000UL, wifiConnected, espNowOk,
-                  (unsigned long)csiIrqCount, espNowTxCount);
   }
 
 #if HAS_DISPLAY
