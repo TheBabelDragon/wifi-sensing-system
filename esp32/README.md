@@ -1,64 +1,55 @@
-# ESP32 CSI nodes (ESP-NOW + auto WiFiManager)
+# ESP32 CSI nodes (secured + ESP-NOW + closed loop)
 
-| Path | Role |
-|------|------|
-| **ESP-NOW** | Compact CSI broadcast — always on |
-| **UDP :4210** | Full CSI JSON → Echo Grid (when on house WiFi) |
-| **UDP :4211** | `echo_cmd` from Echo Grid |
+## Security
 
-## Node IDs (unique per board)
+| Control | Default |
+|---------|---------|
+| Unique node ID | MAC-based `csi-A1B2C3` / `cyd-A1B2C3` |
+| Setup portal | **WPA2** password `echogrid1` |
+| Packet auth | Shared secret tag on UDP + ESP-NOW payloads |
+| Command auth | `echo_cmd` boost/rate require auth tag |
+| ESP-NOW PMK | Derived from shared secret |
 
-Each board names itself from its **MAC address**:
+**Change before production:**
 
-| Board | Example ID | Portal AP |
-|-------|------------|-----------|
-| DevKit | `csi-A1B2C3` | `CSI-csi-A1B2C3` |
-| CYD | `cyd-A1B2C3` | `CSI-cyd-A1B2C3` |
+```ini
+; platformio.ini build_flags
+-DECHO_SECRET=\"your-long-random-secret\"
+-DECHO_PORTAL_PASS=\"your-portal-pass\"
+```
 
-No more shared `node_01` / `cyd_01` names. Every board is unique on your phone.
+Host must use the same secret:
 
-## Boot behaviour
+```bash
+export ECHO_SECRET='your-long-random-secret'
+python visualization/dashboard.py --csi --secret "$ECHO_SECRET"
+```
 
-1. Read MAC → unique `NODE_ID`  
-2. If saved WiFi exists → try join (~8 s)  
-3. If not connected → **WiFiManager portal** (AP `CSI-<nodeid>`, 3 min)  
-4. Then CSI + ESP-NOW start  
-5. ESP-NOW works with or without house WiFi  
+Defaults are in `esp32/include/echo_secret.h` (`echogrid-change-me` / `echogrid1`).
+
+## Boot
+
+1. Unique ID from MAC  
+2. Try saved WiFi → else portal AP `CSI-<id>` (password-protected)  
+3. CSI + ESP-NOW  
+4. UDP CSI with `auth` tag when on LAN  
 
 ## Flash
 
 ```bash
-cd wifi-sensing-system/esp32
-git pull
-chmod +x flash.sh
-
-# Standard DevKit
+cd esp32 && git pull
 ./flash.sh --standard -p /dev/ttyUSB0 -e --monitor
-
-# Cheap Yellow Display
 ./flash.sh --cyd -p /dev/ttyUSB1 -e --monitor
 ```
 
-### Pure PlatformIO
+Portal on phone: join `CSI-…`, password **`echogrid1`** (unless you changed it).
+
+## Closed-loop Echo Grid
 
 ```bash
-pio run -e esp32-standard -t upload --upload-port /dev/ttyUSB0
-pio run -e esp32-cyd -t upload --upload-port /dev/ttyUSB1
+python visualization/dashboard.py --csi --secret echogrid-change-me
 ```
 
-## First setup
-
-1. Flash  
-2. On phone, join **`CSI-csi-XXXXXX`** or **`CSI-cyd-XXXXXX`**  
-3. Enter house WiFi  
-4. Done — node is unique and on the LAN  
-
-Optional serial: `status` | `portal`
-
-## Echo Grid
-
-```bash
-python visualization/dashboard.py --csi
-```
-
-UDP **4210**. One WiFi-connected node bridges ESP-NOW peers automatically.
+- Receives CSI on **:4210**
+- Sends `echo_cmd` field/boost/quiet on **:4211**
+- Nodes show field mirror (CYD UI + internal state)

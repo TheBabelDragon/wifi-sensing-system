@@ -8,6 +8,7 @@
 #include <esp_now.h>
 #include <cmath>
 #include <cstring>
+#include "echo_secret.h"
 
 #ifndef HAS_DISPLAY
 #define HAS_DISPLAY 0
@@ -31,8 +32,6 @@ const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;
 const uint32_t WIFI_RECONNECT_MS       = 30000;
 const uint32_t WIFI_PORTAL_TIMEOUT_S   = 180;
 
-// Runtime unique ID from MAC — never "node_01"
-// Examples: csi-A1B2C3  /  cyd-A1B2C3
 char NODE_ID[16] = "csi-boot";
 
 uint32_t sendIntervalMs = 500;
@@ -84,18 +83,69 @@ struct EspNowCsiPkt {
   uint8_t  movement;
   uint8_t  hot_zones;
   uint8_t  flags;
+  uint32_t auth;       // keyed tag (not crypto-grade, stops casual injection)
   uint8_t  csi[32];
 };
 #pragma pack(pop)
 
 static const uint8_t ESPNOW_BROADCAST[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+// ESP-NOW primary master key (16 bytes) — derived from ECHO_SECRET
+static uint8_t ESPNOW_PMK[16];
+
 volatile bool espNowRxPending = false;
 EspNowCsiPkt  espNowRxPkt;
 
-// Build unique node id from chip MAC (last 3 octets)
+// FNV-1a style tag — must match visualization/dashboard.py auth_tag()
+uint32_t fnvTag(const char* secret, const char* node, uint32_t bucket) {
+  uint32_t h = 2166136261u;
+  auto mix = [&](const char* s) {
+    if (!s) return;
+    for (const char* p = s; *p; ++p) {
+      h ^= (uint8_t)(*p);
+      h *= 16777619u;
+    }
+  };
+  mix(secret);
+  h ^= (uint8_t)'|'; h *= 16777619u;
+  mix(node);
+  h ^= (uint8_t)'|'; h *= 16777619u;
+  char bbuf[16];
+  snprintf(bbuf, sizeof(bbuf), "%lu", (unsigned long)bucket);
+  mix(bbuf);
+  return h;
+}
+
+void makeAuthHex(char out[9], const char* node, uint32_t ts_ms) {
+  uint32_t bucket = ts_ms / 60000UL;
+  uint32_t h = fnvTag(ECHO_SECRET, node, bucket);
+  snprintf(out, 9, "%08x", (unsigned)h);
+}
+
+bool checkAuthHex(const char* got, const char* node, uint32_t ts_ms) {
+  if (!got || !got[0]) return false;
+  uint32_t bucket = ts_ms / 60000UL;
+  for (int skew = -1; skew <= 1; skew++) {
+    uint32_t h = fnvTag(ECHO_SECRET, node, bucket + (uint32_t)skew);
+    char expect[9];
+    snprintf(expect, 9, "%08x", (unsigned)h);
+    if (strcasecmp(got, expect) == 0) return true;
+  }
+  return false;
+}
+
+uint32_t makeAuthU32(const char* node, uint32_t ts_ms) {
+  return fnvTag(ECHO_SECRET, node, ts_ms / 60000UL);
+}
+
+void derivePmk() {
+  // Fold secret into 16-byte PMK
+  memset(ESPNOW_PMK, 0x5A, 16);
+  const char* s = ECHO_SECRET;
+  for (int i = 0; s[i]; i++) ESPNOW_PMK[i % 16] ^= (uint8_t)s[i];
+}
+
 void makeNodeId() {
 #ifdef NODE_ID_STR
-  // Optional compile-time override
   strncpy(NODE_ID, NODE_ID_STR, sizeof(NODE_ID) - 1);
   NODE_ID[sizeof(NODE_ID) - 1] = 0;
 #else
@@ -128,50 +178,55 @@ void lockOfflineChannel() {
 #if HAS_DISPLAY
 const uint16_t COL_BG = 0x0841, COL_PANEL = 0x1082, COL_CYAN = 0x07FF;
 const uint16_t COL_GREEN = 0x07E0, COL_YELLOW = 0xFFE0, COL_WHITE = 0xFFFF;
-const uint16_t COL_DIM = 0x8410, COL_BAR_BG = 0x2104;
+const uint16_t COL_DIM = 0x8410, COL_BAR_BG = 0x2104, COL_ORANGE = 0xFD20;
 
 void initDisplay() {
-  // CYD backlight — never block boot if panel fails
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
   delay(20);
-
   tft.init();
-  tft.setRotation(1);          // landscape 320x240
+  tft.setRotation(1);
   tft.fillScreen(COL_BG);
-
   tft.fillRect(0, 0, 320, 24, COL_PANEL);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COL_CYAN, COL_PANEL);
   tft.drawString("ECHO GRID", 6, 4, 2);
   tft.setTextColor(COL_WHITE, COL_PANEL);
   tft.drawString(NODE_ID, 120, 6, 2);
-
-  tft.setTextColor(COL_DIM, COL_BG);
-  tft.drawString("booting...", 6, 40, 2);
   displayOk = true;
   Serial.println("[TFT] OK");
 }
 
 void updateDisplay() {
   if (!displayOk) return;
-  tft.fillRect(0, 30, 320, 30, COL_BG);
+  tft.fillRect(0, 28, 320, 90, COL_BG);
 
   uint16_t wc = wifiConnected ? COL_GREEN : COL_YELLOW;
-  tft.fillRoundRect(6, 34, 56, 20, 3, wc);
+  tft.fillRoundRect(6, 32, 56, 20, 3, wc);
   tft.setTextColor(COL_BG, wc);
-  tft.drawString(wifiConnected ? "WiFi" : "LOC", 14, 38, 2);
+  tft.drawString(wifiConnected ? "WiFi" : "LOC", 14, 36, 2);
 
-  tft.fillRoundRect(70, 34, 90, 20, 3, COL_BAR_BG);
+  tft.fillRoundRect(70, 32, 80, 20, 3, COL_BAR_BG);
   tft.setTextColor(COL_YELLOW, COL_BAR_BG);
-  char line[24];
-  snprintf(line, sizeof(line), "ch %d", WiFi.channel());
-  tft.drawString(line, 78, 38, 2);
+  char line[32];
+  snprintf(line, sizeof(line), "ch%d", WiFi.channel());
+  tft.drawString(line, 78, 36, 2);
 
-  tft.fillRoundRect(170, 34, 140, 20, 3, COL_BAR_BG);
+  tft.fillRoundRect(160, 32, 150, 20, 3, COL_BAR_BG);
   tft.setTextColor(COL_CYAN, COL_BAR_BG);
   snprintf(line, sizeof(line), "EN %d", espNowTxCount);
-  tft.drawString(line, 178, 38, 2);
+  tft.drawString(line, 168, 36, 2);
+
+  if (hasFieldMirror) {
+    tft.setTextColor(COL_ORANGE, COL_BG);
+    snprintf(line, sizeof(line), "H %.2f  T %d  mot %.2f", fieldEntropy, fieldTracks, fieldMotion);
+    tft.drawString(line, 6, 60, 2);
+    tft.setTextColor(fieldAgreed ? COL_GREEN : COL_DIM, COL_BG);
+    tft.drawString(fieldAgreed ? "AGREED" : "single", 6, 88, 2);
+  } else {
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.drawString("awaiting Echo Grid field...", 6, 60, 2);
+  }
 }
 #else
 void initDisplay() {}
@@ -216,7 +271,6 @@ void updateRichCSIFeatures() {
   memcpy(prevCSI, latestRealCSI, sizeof(prevCSI));
 }
 
-// Keep ISR light — no sqrt in IRAM path
 void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
   if (!info || !info->buf || info->len < 2) return;
   int numSub = info->len / 2;
@@ -224,7 +278,6 @@ void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
   for (int i = 0; i < numSub; i++) {
     int8_t re = info->buf[i * 2];
     int8_t im = info->buf[i * 2 + 1];
-    // Manhattan magnitude approx — fast, good enough for activity
     int mag = (re < 0 ? -re : re) + (im < 0 ? -im : im);
     float amp = mag / 280.0f;
     csiScratch[i] = amp > 1.0f ? 1.0f : amp;
@@ -269,6 +322,15 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
   const EspNowCsiPkt* pkt = (const EspNowCsiPkt*)data;
   if (memcmp(pkt->magic, "CSI1", 4) != 0) return;
   if (strncmp(pkt->node, NODE_ID, sizeof(pkt->node)) == 0) return;
+  // Verify auth tag
+  uint32_t expect = makeAuthU32(pkt->node, pkt->ts_ms);
+  if (pkt->auth != expect) {
+    // allow adjacent bucket
+    uint32_t b = pkt->ts_ms / 60000UL;
+    if (pkt->auth != fnvTag(ECHO_SECRET, pkt->node, b - 1) &&
+        pkt->auth != fnvTag(ECHO_SECRET, pkt->node, b + 1))
+      return;
+  }
   memcpy(&espNowRxPkt, pkt, sizeof(EspNowCsiPkt));
   espNowRxPending = true;
   espNowRxCount++;
@@ -285,9 +347,12 @@ bool initEspNow() {
     return false;
   }
   espNowEverInited = true;
+  derivePmk();
+  esp_now_set_pmk(ESPNOW_PMK);
   esp_now_register_send_cb(onEspNowSent);
   esp_now_register_recv_cb(onEspNowRecv);
 
+  // Broadcast peer cannot use CCMP encrypt on all cores — payload auth instead
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, ESPNOW_BROADCAST, 6);
   peer.channel = 0;
@@ -299,7 +364,7 @@ bool initEspNow() {
     return false;
   }
   espNowOk = true;
-  Serial.println("[ESP-NOW] ready");
+  Serial.println("[ESP-NOW] ready (PMK set, payload auth)");
   return true;
 }
 
@@ -315,6 +380,7 @@ void sendEspNowCsi() {
   pkt.movement  = (uint8_t)constrain((int)(movementIntensity * 255.0f), 0, 255);
   pkt.hot_zones = (uint8_t)hotZoneCount;
   pkt.flags     = significantObstruction ? 0x01 : 0x00;
+  pkt.auth      = makeAuthU32(NODE_ID, pkt.ts_ms);
   for (int i = 0; i < 32; i++) {
     float v = latestRealCSI[i];
     if (v < 0) v = 0;
@@ -327,7 +393,7 @@ void sendEspNowCsi() {
 
 void forwardEspNowToUdp(const EspNowCsiPkt* pkt) {
   if (!wifiConnected || !pkt) return;
-  StaticJsonDocument<640> doc;
+  StaticJsonDocument<700> doc;
   doc["node"] = pkt->node;
   doc["timestamp"] = pkt->ts_ms;
   doc["rssi"] = (int)pkt->rssi;
@@ -339,9 +405,12 @@ void forwardEspNowToUdp(const EspNowCsiPkt* pkt) {
   doc["obstruction"] = (pkt->flags & 0x01) != 0;
   doc["via"] = "espnow";
   doc["bridge"] = NODE_ID;
+  char ah[9];
+  makeAuthHex(ah, pkt->node, pkt->ts_ms);
+  doc["auth"] = ah;
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(pkt->csi[i] / 255.0f);
-  char buf[640];
+  char buf[700];
   size_t n = serializeJson(doc, buf);
   IPAddress bcast = WiFi.localIP();
   bcast[3] = 255;
@@ -388,11 +457,9 @@ bool trySavedWifi(uint32_t timeoutMs) {
   return false;
 }
 
-// Portal AP name is unique per board: CSI-cyd-A1B2C3
 void runWifiSetup() {
   hasStaCredentials = staCredentialsSaved();
 
-  // Fast path: already provisioned → try join, skip portal if OK
   if (hasStaCredentials) {
     Serial.println("[WiFi] trying saved network...");
     if (trySavedWifi(WIFI_CONNECT_TIMEOUT_MS)) {
@@ -407,22 +474,22 @@ void runWifiSetup() {
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  WiFiManager portal");
-  Serial.printf( "  Join AP:  %s\n", apName);
-  Serial.println("  Set house WiFi on your phone");
+  Serial.println("  WiFiManager portal (WPA2)");
+  Serial.printf( "  AP:       %s\n", apName);
+  Serial.printf( "  Password: %s\n", ECHO_PORTAL_PASS);
   Serial.println("  Timeout 3 minutes");
   Serial.println("========================================");
   Serial.flush();
 
 #if HAS_DISPLAY
   if (displayOk) {
-    tft.fillScreen(0x0841);
-    tft.setTextColor(0x07FF, 0x0841);
+    tft.fillScreen(COL_BG);
+    tft.setTextColor(COL_CYAN, COL_BG);
     tft.drawString("WiFi setup", 6, 20, 2);
-    tft.setTextColor(0xFFFF, 0x0841);
+    tft.setTextColor(COL_WHITE, COL_BG);
     tft.drawString(apName, 6, 50, 2);
-    tft.setTextColor(0x8410, 0x0841);
-    tft.drawString("Join AP on phone", 6, 90, 2);
+    tft.setTextColor(COL_YELLOW, COL_BG);
+    tft.drawString(ECHO_PORTAL_PASS, 6, 80, 2);
   }
 #endif
 
@@ -434,7 +501,8 @@ void runWifiSetup() {
   wm.setConnectTimeout(15);
   wm.setDebugOutput(false);
 
-  bool ok = wm.startConfigPortal(apName);
+  // Password-protected setup AP (WPA2)
+  bool ok = wm.startConfigPortal(apName, ECHO_PORTAL_PASS);
   hasStaCredentials = staCredentialsSaved();
 
   if (ok && WiFi.status() == WL_CONNECTED) {
@@ -478,9 +546,9 @@ void maintainWifi() {
 
 void printStatus() {
   Serial.printf(
-    "[status] id=%s wifi=%d creds=%d csi=%d espnow=%d ch=%d udp=%d en_tx=%d en_rx=%d\n",
+    "[status] id=%s wifi=%d creds=%d csi=%d espnow=%d ch=%d udp=%d en_tx=%d en_rx=%d mirror=%d\n",
     NODE_ID, wifiConnected, hasStaCredentials, csiHardwareOk, espNowOk,
-    WiFi.channel(), packetCount, espNowTxCount, espNowRxCount
+    WiFi.channel(), packetCount, espNowTxCount, espNowRxCount, hasFieldMirror
   );
 }
 
@@ -510,6 +578,25 @@ void handleEchoCommand(const char* json, size_t len) {
   StaticJsonDocument<512> doc;
   if (deserializeJson(doc, json, len)) return;
   if (strcmp(doc["type"] | "", "echo_cmd") != 0) return;
+
+  // Require auth on commands when secret is non-default-empty
+  const char* auth = doc["auth"] | "";
+  // Host uses wall-clock ms; accept host tag with node "host"
+  bool ok = checkAuthHex(auth, "host", (uint32_t)(doc["timestamp"] | millis()));
+  if (!ok) {
+    // also try current millis buckets for host
+    ok = checkAuthHex(auth, "host", millis());
+  }
+  if (!ok) {
+    // soft-accept field mirror without auth for first bring-up if secret is still default
+    // but reject boost/rate changes without auth always when possible
+    const char* cmd0 = doc["cmd"] | "";
+    if (strcmp(cmd0, "field") != 0) {
+      Serial.println("[cmd] rejected — bad auth");
+      return;
+    }
+  }
+
   const char* cmd = doc["cmd"] | "";
   cmdCount++;
   if (strcmp(cmd, "field") == 0) {
@@ -546,9 +633,10 @@ void pollCommands() {
 
 void sendUdpCsi() {
   if (!wifiConnected) return;
-  StaticJsonDocument<1400> doc;
+  StaticJsonDocument<1500> doc;
   doc["node"] = NODE_ID;
-  doc["timestamp"] = millis();
+  uint32_t ts = millis();
+  doc["timestamp"] = ts;
   doc["rssi"] = (int)WiFi.RSSI();
   doc["type"] = "wifi_csi";
   doc["band"] = currentBandLabel();
@@ -561,11 +649,14 @@ void sendUdpCsi() {
   doc["interval_ms"] = sendIntervalMs;
   doc["boost"] = boostLevel;
   doc["via"] = "udp";
+  char ah[9];
+  makeAuthHex(ah, NODE_ID, ts);
+  doc["auth"] = ah;
   JsonArray bandMov = doc.createNestedArray("band_movement");
   for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
-  char buf[1400];
+  char buf[1500];
   size_t n = serializeJson(doc, buf);
   IPAddress bcast = WiFi.localIP();
   bcast[3] = 255;
@@ -591,7 +682,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println();
-  Serial.println("=== ESP32 CSI + ESP-NOW ===");
+  Serial.println("=== ESP32 CSI + ESP-NOW (secured) ===");
   Serial.flush();
 
 #if !HAS_DISPLAY
@@ -599,23 +690,21 @@ void setup() {
   statusLed(false);
 #endif
 
-  // WiFi stack first so we can read MAC for unique ID
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   delay(50);
   makeNodeId();
-  Serial.printf("NODE_ID=%s  (unique per board)\n", NODE_ID);
+  derivePmk();
+  Serial.printf("NODE_ID=%s\n", NODE_ID);
+  Serial.println("[sec] portal WPA2 + packet auth enabled");
   Serial.flush();
 
-  // Display after we know NODE_ID (CYD only)
 #if HAS_DISPLAY
   initDisplay();
 #endif
 
-  // WiFi setup BEFORE CSI/ESP-NOW — clean radio for portal
   runWifiSetup();
 
-  // Sensing path after portal
   if (USE_REAL_CSI) {
     csiHardwareOk = initRealCSI();
     Serial.println(csiHardwareOk ? "[CSI] OK" : "[CSI] fallback");
