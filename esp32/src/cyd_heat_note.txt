@@ -1,1 +1,1 @@
-placeholder
+deleted - color pop is in main.cpp heatColor / updateExcitement
