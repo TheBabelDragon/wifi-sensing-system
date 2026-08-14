@@ -13,10 +13,6 @@
 #define HAS_DISPLAY 0
 #endif
 
-#ifndef NODE_ID_STR
-#define NODE_ID_STR "esp32_node_01"
-#endif
-
 #if HAS_DISPLAY
   #include <TFT_eSPI.h>
   TFT_eSPI tft = TFT_eSPI();
@@ -25,23 +21,24 @@
   #endif
 #endif
 
-const uint16_t CSI_PORT         = 4210;
-const uint16_t CMD_PORT         = 4211;
-const char* NODE_ID             = NODE_ID_STR;
-const int STATUS_LED_PIN        = 2;
-const bool USE_REAL_CSI         = true;
-
-// Stable channel for offline CSI + ESP-NOW
+const uint16_t CSI_PORT = 4210;
+const uint16_t CMD_PORT = 4211;
+const int STATUS_LED_PIN = 2;
+const bool USE_REAL_CSI = true;
 const uint8_t OFFLINE_CSI_CHANNEL = 6;
 
 const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;
 const uint32_t WIFI_RECONNECT_MS       = 30000;
-const uint32_t WIFI_PORTAL_TIMEOUT_S   = 180;   // 3 min to configure
+const uint32_t WIFI_PORTAL_TIMEOUT_S   = 180;
 
-uint32_t sendIntervalMs         = 500;
-uint32_t minIntervalMs          = 150;
-uint32_t maxIntervalMs          = 1200;
-float boostLevel                = 0.0f;
+// Runtime unique ID from MAC — never "node_01"
+// Examples: csi-A1B2C3  /  cyd-A1B2C3
+char NODE_ID[16] = "csi-boot";
+
+uint32_t sendIntervalMs = 500;
+uint32_t minIntervalMs  = 150;
+uint32_t maxIntervalMs  = 1200;
+float boostLevel = 0.0f;
 
 float fieldEntropy = 0, fieldMotion = 0, fieldDfMax = 0;
 int fieldTracks = 0, fieldNodes = 0, fieldBands = 0;
@@ -71,6 +68,7 @@ int packetCount = 0, cmdCount = 0;
 int espNowTxCount = 0, espNowRxCount = 0;
 bool espNowOk = false;
 bool espNowEverInited = false;
+bool displayOk = false;
 
 char serialBuf[48];
 size_t serialLen = 0;
@@ -91,14 +89,29 @@ struct EspNowCsiPkt {
 #pragma pack(pop)
 
 static const uint8_t ESPNOW_BROADCAST[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-
 volatile bool espNowRxPending = false;
 EspNowCsiPkt  espNowRxPkt;
 
+// Build unique node id from chip MAC (last 3 octets)
+void makeNodeId() {
+#ifdef NODE_ID_STR
+  // Optional compile-time override
+  strncpy(NODE_ID, NODE_ID_STR, sizeof(NODE_ID) - 1);
+  NODE_ID[sizeof(NODE_ID) - 1] = 0;
+#else
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+#if HAS_DISPLAY
+  snprintf(NODE_ID, sizeof(NODE_ID), "cyd-%02X%02X%02X", mac[3], mac[4], mac[5]);
+#else
+  snprintf(NODE_ID, sizeof(NODE_ID), "csi-%02X%02X%02X", mac[3], mac[4], mac[5]);
+#endif
+#endif
+}
+
 const char* currentBandLabel() {
   int ch = WiFi.channel();
-  if (ch >= 36) return "5";
-  return "2.4";
+  return (ch >= 36) ? "5" : "2.4";
 }
 
 bool staCredentialsSaved() {
@@ -113,55 +126,56 @@ void lockOfflineChannel() {
 }
 
 #if HAS_DISPLAY
-const uint16_t COL_BG=0x0841, COL_PANEL=0x1082, COL_CYAN=0x07FF, COL_MAG=0xF81F;
-const uint16_t COL_ORANGE=0xFD20, COL_GREEN=0x07E0, COL_YELLOW=0xFFE0;
-const uint16_t COL_WHITE=0xFFFF, COL_DIM=0x8410, COL_BAR_BG=0x2104, COL_PURPLE=0xA01F;
-
-void drawRoundPanel(int x, int y, int w, int h, uint16_t fill) {
-  tft.fillRoundRect(x, y, w, h, 5, fill);
-  tft.drawRoundRect(x, y, w, h, 5, COL_DIM);
-}
+const uint16_t COL_BG = 0x0841, COL_PANEL = 0x1082, COL_CYAN = 0x07FF;
+const uint16_t COL_GREEN = 0x07E0, COL_YELLOW = 0xFFE0, COL_WHITE = 0xFFFF;
+const uint16_t COL_DIM = 0x8410, COL_BAR_BG = 0x2104;
 
 void initDisplay() {
+  // CYD backlight — never block boot if panel fails
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
+  delay(20);
+
   tft.init();
-  tft.setRotation(1);
+  tft.setRotation(1);          // landscape 320x240
   tft.fillScreen(COL_BG);
-  tft.fillRect(0, 0, 320, 22, COL_PANEL);
+
+  tft.fillRect(0, 0, 320, 24, COL_PANEL);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COL_CYAN, COL_PANEL);
-  tft.drawString("ECHO GRID CSI", 4, 4, 2);
+  tft.drawString("ECHO GRID", 6, 4, 2);
   tft.setTextColor(COL_WHITE, COL_PANEL);
-  tft.drawString(NODE_ID, 130, 6, 1);
-  drawRoundPanel(2, 24, 156, 40, COL_PANEL);
-  drawRoundPanel(162, 24, 76, 40, COL_PANEL);
-  drawRoundPanel(242, 24, 76, 40, COL_PANEL);
-  drawRoundPanel(2, 66, 316, 22, COL_PANEL);
-  drawRoundPanel(2, 90, 316, 48, COL_PANEL);
-  drawRoundPanel(2, 140, 316, 98, COL_PANEL);
+  tft.drawString(NODE_ID, 120, 6, 2);
+
+  tft.setTextColor(COL_DIM, COL_BG);
+  tft.drawString("booting...", 6, 40, 2);
+  displayOk = true;
+  Serial.println("[TFT] OK");
 }
 
 void updateDisplay() {
-  // Minimal UI refresh — full draw only when needed
-  tft.fillRect(6, 68, 308, 18, COL_PANEL);
+  if (!displayOk) return;
+  tft.fillRect(0, 30, 320, 30, COL_BG);
+
   uint16_t wc = wifiConnected ? COL_GREEN : COL_YELLOW;
-  tft.fillRoundRect(6, 68, 48, 16, 3, wc);
+  tft.fillRoundRect(6, 34, 56, 20, 3, wc);
   tft.setTextColor(COL_BG, wc);
-  tft.drawString(wifiConnected ? "WiFi" : "LOC", 12, 71, 1);
+  tft.drawString(wifiConnected ? "WiFi" : "LOC", 14, 38, 2);
 
-  tft.fillRoundRect(58, 68, 70, 16, 3, COL_BAR_BG);
+  tft.fillRoundRect(70, 34, 90, 20, 3, COL_BAR_BG);
   tft.setTextColor(COL_YELLOW, COL_BAR_BG);
-  char bb[16];
-  snprintf(bb, sizeof(bb), "ch%d", WiFi.channel());
-  tft.drawString(bb, 62, 71, 1);
+  char line[24];
+  snprintf(line, sizeof(line), "ch %d", WiFi.channel());
+  tft.drawString(line, 78, 38, 2);
 
-  tft.fillRoundRect(134, 68, 70, 16, 3, COL_BAR_BG);
+  tft.fillRoundRect(170, 34, 140, 20, 3, COL_BAR_BG);
   tft.setTextColor(COL_CYAN, COL_BAR_BG);
-  char eb[16];
-  snprintf(eb, sizeof(eb), "en%d", espNowTxCount % 10000);
-  tft.drawString(eb, 138, 71, 1);
+  snprintf(line, sizeof(line), "EN %d", espNowTxCount);
+  tft.drawString(line, 178, 38, 2);
 }
+#else
+void initDisplay() {}
+void updateDisplay() {}
 #endif
 
 void statusLed(bool on) {
@@ -202,14 +216,17 @@ void updateRichCSIFeatures() {
   memcpy(prevCSI, latestRealCSI, sizeof(prevCSI));
 }
 
-void IRAM_ATTR csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
+// Keep ISR light — no sqrt in IRAM path
+void csi_rx_cb(void* ctx, wifi_csi_info_t* info) {
   if (!info || !info->buf || info->len < 2) return;
   int numSub = info->len / 2;
   if (numSub > 32) numSub = 32;
   for (int i = 0; i < numSub; i++) {
     int8_t re = info->buf[i * 2];
     int8_t im = info->buf[i * 2 + 1];
-    float amp = sqrtf((float)re * re + (float)im * im) / 200.0f;
+    // Manhattan magnitude approx — fast, good enough for activity
+    int mag = (re < 0 ? -re : re) + (im < 0 ? -im : im);
+    float amp = mag / 280.0f;
     csiScratch[i] = amp > 1.0f ? 1.0f : amp;
   }
   for (int i = numSub; i < 32; i++) csiScratch[i] = 0.0f;
@@ -237,20 +254,9 @@ bool initRealCSI() {
   if (esp_wifi_set_csi_config(&cfg) != ESP_OK) return false;
   if (esp_wifi_set_csi_rx_cb(csi_rx_cb, NULL) != ESP_OK) return false;
   if (esp_wifi_set_csi(true) != ESP_OK) return false;
-  for (int i = 0; i < 32; i++) {
+  for (int i = 0; i < 32; i++)
     latestRealCSI[i] = prevCSI[i] = csiScratch[i] = 0.3f;
-  }
   return true;
-}
-
-void stopCsiAndEspNow() {
-  esp_wifi_set_csi(false);
-  esp_wifi_set_promiscuous(false);
-  if (espNowOk || espNowEverInited) {
-    esp_now_deinit();
-    espNowOk = false;
-  }
-  delay(20);
 }
 
 void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
@@ -273,7 +279,6 @@ bool initEspNow() {
     esp_now_deinit();
     delay(10);
   }
-
   if (esp_now_init() != ESP_OK) {
     Serial.println("[ESP-NOW] init failed");
     espNowOk = false;
@@ -288,7 +293,6 @@ bool initEspNow() {
   peer.channel = 0;
   peer.encrypt = false;
   peer.ifidx = WIFI_IF_STA;
-
   if (esp_now_add_peer(&peer) != ESP_OK) {
     Serial.println("[ESP-NOW] peer failed");
     espNowOk = false;
@@ -301,17 +305,16 @@ bool initEspNow() {
 
 void sendEspNowCsi() {
   if (!espNowOk) return;
-
   EspNowCsiPkt pkt = {};
   memcpy(pkt.magic, "CSI1", 4);
   strncpy(pkt.node, NODE_ID, sizeof(pkt.node) - 1);
-  pkt.ts_ms    = millis();
-  pkt.rssi     = wifiConnected ? (int8_t)WiFi.RSSI() : (int8_t)-100;
-  pkt.channel  = (uint8_t)WiFi.channel();
-  pkt.activity = (uint8_t)constrain((int)(activityLevel * 255.0f), 0, 255);
-  pkt.movement = (uint8_t)constrain((int)(movementIntensity * 255.0f), 0, 255);
+  pkt.ts_ms     = millis();
+  pkt.rssi      = wifiConnected ? (int8_t)WiFi.RSSI() : (int8_t)-100;
+  pkt.channel   = (uint8_t)WiFi.channel();
+  pkt.activity  = (uint8_t)constrain((int)(activityLevel * 255.0f), 0, 255);
+  pkt.movement  = (uint8_t)constrain((int)(movementIntensity * 255.0f), 0, 255);
   pkt.hot_zones = (uint8_t)hotZoneCount;
-  pkt.flags = significantObstruction ? 0x01 : 0x00;
+  pkt.flags     = significantObstruction ? 0x01 : 0x00;
   for (int i = 0; i < 32; i++) {
     float v = latestRealCSI[i];
     if (v < 0) v = 0;
@@ -324,7 +327,6 @@ void sendEspNowCsi() {
 
 void forwardEspNowToUdp(const EspNowCsiPkt* pkt) {
   if (!wifiConnected || !pkt) return;
-
   StaticJsonDocument<640> doc;
   doc["node"] = pkt->node;
   doc["timestamp"] = pkt->ts_ms;
@@ -339,7 +341,6 @@ void forwardEspNowToUdp(const EspNowCsiPkt* pkt) {
   doc["bridge"] = NODE_ID;
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(pkt->csi[i] / 255.0f);
-
   char buf[640];
   size_t n = serializeJson(doc, buf);
   IPAddress bcast = WiFi.localIP();
@@ -387,45 +388,53 @@ bool trySavedWifi(uint32_t timeoutMs) {
   return false;
 }
 
-void restoreSensingRadio() {
-  WiFi.mode(WIFI_STA);
-  delay(30);
-  if (csiHardwareOk) {
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_csi(true);
-  }
-  if (WiFi.status() != WL_CONNECTED) lockOfflineChannel();
-  initEspNow();
-}
+// Portal AP name is unique per board: CSI-cyd-A1B2C3
+void runWifiSetup() {
+  hasStaCredentials = staCredentialsSaved();
 
-// ---------- AUTO WiFiManager (no serial required) ----------
-void runAutoPortal() {
+  // Fast path: already provisioned → try join, skip portal if OK
+  if (hasStaCredentials) {
+    Serial.println("[WiFi] trying saved network...");
+    if (trySavedWifi(WIFI_CONNECT_TIMEOUT_MS)) {
+      Serial.println("[WiFi] saved network OK — no portal");
+      return;
+    }
+    Serial.println("[WiFi] saved network failed — opening portal");
+  }
+
+  char apName[24];
+  snprintf(apName, sizeof(apName), "CSI-%s", NODE_ID);
+
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  WiFiManager starting");
-  Serial.printf( "  AP name: ESP32-CSI-%s\n", NODE_ID);
-  Serial.println("  Join that AP on your phone, set house WiFi");
-  Serial.println("  Timeout: 3 minutes");
+  Serial.println("  WiFiManager portal");
+  Serial.printf( "  Join AP:  %s\n", apName);
+  Serial.println("  Set house WiFi on your phone");
+  Serial.println("  Timeout 3 minutes");
   Serial.println("========================================");
   Serial.flush();
 
-  // Portal needs a clean radio — pause CSI + ESP-NOW
-  stopCsiAndEspNow();
+#if HAS_DISPLAY
+  if (displayOk) {
+    tft.fillScreen(0x0841);
+    tft.setTextColor(0x07FF, 0x0841);
+    tft.drawString("WiFi setup", 6, 20, 2);
+    tft.setTextColor(0xFFFF, 0x0841);
+    tft.drawString(apName, 6, 50, 2);
+    tft.setTextColor(0x8410, 0x0841);
+    tft.drawString("Join AP on phone", 6, 90, 2);
+  }
+#endif
 
   WiFi.mode(WIFI_STA);
-  delay(50);
+  delay(30);
 
   WiFiManager wm;
   wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
   wm.setConnectTimeout(15);
   wm.setDebugOutput(false);
-  wm.setEnableConfigPortal(true);
 
-  String apName = String("ESP32-CSI-") + NODE_ID;
-
-  // Always show portal (even if creds exist) so you can reconfigure
-  bool ok = wm.startConfigPortal(apName.c_str());
-
+  bool ok = wm.startConfigPortal(apName);
   hasStaCredentials = staCredentialsSaved();
 
   if (ok && WiFi.status() == WL_CONNECTED) {
@@ -436,13 +445,10 @@ void runAutoPortal() {
   } else {
     wifiConnected = false;
     statusLed(false);
-    Serial.println("[WiFi] portal done / timed out — continuing offline");
+    WiFi.mode(WIFI_STA);
+    lockOfflineChannel();
+    Serial.println("[WiFi] portal done — offline ESP-NOW mode");
   }
-
-  // Always restore sensing path
-  restoreSensingRadio();
-  Serial.println("[boot] CSI + ESP-NOW active");
-  Serial.flush();
 }
 
 void maintainWifi() {
@@ -461,7 +467,7 @@ void maintainWifi() {
     statusLed(false);
     lockOfflineChannel();
     initEspNow();
-    Serial.println("[WiFi] lost — local ESP-NOW mode");
+    Serial.println("[WiFi] lost — local ESP-NOW");
   }
   if (!hasStaCredentials) return;
   unsigned long now = millis();
@@ -472,16 +478,16 @@ void maintainWifi() {
 
 void printStatus() {
   Serial.printf(
-    "[status] wifi=%d creds=%d csi=%d espnow=%d ch=%d udp=%d en_tx=%d en_rx=%d\n",
-    wifiConnected, hasStaCredentials, csiHardwareOk, espNowOk,
+    "[status] id=%s wifi=%d creds=%d csi=%d espnow=%d ch=%d udp=%d en_tx=%d en_rx=%d\n",
+    NODE_ID, wifiConnected, hasStaCredentials, csiHardwareOk, espNowOk,
     WiFi.channel(), packetCount, espNowTxCount, espNowRxCount
   );
 }
 
 void handleSerialLine(const char* line) {
   if (strcasecmp(line, "status") == 0) printStatus();
-  else if (strcasecmp(line, "portal") == 0) runAutoPortal(); // still available
-  else if (line[0]) Serial.printf("[serial] try: status | portal\n");
+  else if (strcasecmp(line, "portal") == 0) runWifiSetup();
+  else if (line[0]) Serial.println("[serial] status | portal");
 }
 
 void pollSerial() {
@@ -540,7 +546,6 @@ void pollCommands() {
 
 void sendUdpCsi() {
   if (!wifiConnected) return;
-
   StaticJsonDocument<1400> doc;
   doc["node"] = NODE_ID;
   doc["timestamp"] = millis();
@@ -560,7 +565,6 @@ void sendUdpCsi() {
   for (int b = 0; b < 4; b++) bandMov.add(bandMovement[b]);
   JsonArray csiArr = doc.createNestedArray("csi");
   for (int i = 0; i < 32; i++) csiArr.add(latestRealCSI[i]);
-
   char buf[1400];
   size_t n = serializeJson(doc, buf);
   IPAddress bcast = WiFi.localIP();
@@ -585,45 +589,48 @@ void sendCSIPacket() {
 
 void setup() {
   Serial.begin(115200);
-  delay(600);
+  delay(500);
   Serial.println();
   Serial.println("=== ESP32 CSI + ESP-NOW ===");
-  Serial.printf("NODE_ID=%s\n", NODE_ID);
   Serial.flush();
 
-#if HAS_DISPLAY
-  initDisplay();
-#else
+#if !HAS_DISPLAY
   pinMode(STATUS_LED_PIN, OUTPUT);
   statusLed(false);
 #endif
 
+  // WiFi stack first so we can read MAC for unique ID
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  delay(40);
+  delay(50);
+  makeNodeId();
+  Serial.printf("NODE_ID=%s  (unique per board)\n", NODE_ID);
+  Serial.flush();
 
-  hasStaCredentials = staCredentialsSaved();
-  Serial.printf("[WiFi] saved creds: %s\n", hasStaCredentials ? "yes" : "no");
+  // Display after we know NODE_ID (CYD only)
+#if HAS_DISPLAY
+  initDisplay();
+#endif
 
-  // Sensing path first (will be paused for portal, then restored)
+  // WiFi setup BEFORE CSI/ESP-NOW — clean radio for portal
+  runWifiSetup();
+
+  // Sensing path after portal
   if (USE_REAL_CSI) {
     csiHardwareOk = initRealCSI();
     Serial.println(csiHardwareOk ? "[CSI] OK" : "[CSI] fallback");
   }
-  lockOfflineChannel();
+  if (WiFi.status() != WL_CONNECTED) lockOfflineChannel();
   initEspNow();
 
   udpCsi.begin(4212);
   udpCmd.begin(CMD_PORT);
 
-  // ALWAYS open WiFiManager so you never need to type portal
-  runAutoPortal();
-
   lastWifiAttempt = millis();
   lastSendTime = millis();
 
-  Serial.println("[boot] running — ESP-NOW always on");
-  Serial.println("       optional serial: status | portal");
+  Serial.println("[boot] running");
+  printStatus();
   Serial.flush();
 }
 
@@ -640,7 +647,7 @@ void loop() {
   }
 
 #if HAS_DISPLAY
-  if (now - lastUiTime > 400) {
+  if (displayOk && now - lastUiTime > 500) {
     updateDisplay();
     lastUiTime = now;
   }
