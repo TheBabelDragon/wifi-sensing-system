@@ -1,37 +1,25 @@
 # WiFi CSI Spatial Intelligence System v2.0
 
-Real hardware ESP32 CSI sensing + closed-loop Echo Grid.
+Real hardware ESP32 CSI + secured closed-loop Echo Grid.
 
-## CSI UDP contract
-
-- **Port 4210** — `wifi_csi` JSON (`node`, `rssi`, `csi[32]`, `auth`, …)
-- **Port 4211** — `echo_cmd` closed-loop feedback (`field`, `boost`, `quiet`, …)
-
-## Echo Grid (closed loop)
+## Quick start (as shipped)
 
 ```bash
-export ECHO_SECRET='echogrid-change-me'   # must match firmware
-python visualization/dashboard.py --csi --secret "$ECHO_SECRET"
+# 1) Flash nodes
+cd esp32 && ./flash.sh --standard -p /dev/ttyUSB0 -e --monitor
+# portal password: Eg7kQ2mN9p
+
+# 2) Host closed-loop viz (secret already matches firmware)
+python visualization/dashboard.py --csi
 ```
 
-## Hardware nodes
+## Ports
 
-```bash
-cd esp32
-./flash.sh --standard -p /dev/ttyUSB0 -e --monitor
-./flash.sh --cyd -p /dev/ttyUSB1 -e --monitor
-```
+- **4210** — CSI JSON in
+- **4211** — `echo_cmd` closed-loop out
 
-- Unique MAC-based names (`csi-A1B2C3`, `cyd-A1B2C3`)
-- Portal AP is **WPA2**-protected (default pass `echogrid1`)
-- Packet + command auth via shared secret  
+## Security (baked in)
+
+Shared secret + WPA2 portal password are compiled into firmware and defaulted in the dashboard. Pull, flash, run.
 
 See `esp32/README.md`.
-
-## Simulation
-
-```bash
-docker compose up --build
-```
-
-Dashboard: http://localhost:8000

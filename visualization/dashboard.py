@@ -3,10 +3,9 @@
 Echo Grid — closed-loop CSI dashboard
 
   python visualization/dashboard.py --csi
-  python visualization/dashboard.py --csi --secret YOUR_SHARED_SECRET
 
-Listens UDP :4210 for wifi_csi packets, visualizes nodes, and sends
-echo_cmd field/boost feedback on :4211 (closed loop).
+Listens UDP :4210, visualizes nodes, sends echo_cmd on :4211.
+Auth secret is baked in to match firmware (override with --secret / ECHO_SECRET).
 """
 from __future__ import annotations
 
@@ -17,20 +16,21 @@ import os
 import socket
 import sys
 import time
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Dict, List, Optional, Tuple
 
 CSI_PORT = 4210
 CMD_PORT = 4211
 
+# Must match esp32/include/echo_secret.h
+DEFAULT_SECRET = "Eg7$kQ2mN9pR4vX8wL3hJ6cF1bA5yU0zT"
+
 
 def auth_tag(secret: str, node: str, ts: int, bucket_ms: int = 60000) -> str:
-    """Must match firmware makeAuthTag() — FNV-1a style keyed tag."""
     if not secret:
         return ""
-    bucket = (int(ts) // bucket_ms) if ts else (int(time.time() * 1000) // bucket_ms)
+    bucket = int(ts) // bucket_ms
     h = 2166136261
     data = f"{secret}|{node}|{bucket}".encode("utf-8")
     for b in data:
@@ -47,20 +47,14 @@ def auth_ok(secret: str, pkt: dict) -> bool:
     got = str(pkt.get("auth") or "")
     if not got:
         return False
-    # accept current and previous time bucket (clock skew / millis vs epoch)
-    for skew in (0, -1, 1):
-        bucket = (ts // 60000) + skew if ts > 1_000_000_000 else (int(time.time() * 1000) // 60000) + skew
-        h = 2166136261
-        data = f"{secret}|{node}|{bucket}".encode("utf-8")
-        for b in data:
-            h ^= b
-            h = (h * 16777619) & 0xFFFFFFFF
-        if f"{h:08x}" == got:
-            return True
-    # also try raw millis buckets from device uptime
     for skew in (0, -1, 1):
         expect = auth_tag(secret, node, ts + skew * 60000)
         if expect == got:
+            return True
+    # wall-clock fallback for mixed timestamp domains
+    now_ms = int(time.time() * 1000)
+    for skew in (0, -1, 1):
+        if auth_tag(secret, node, now_ms + skew * 60000) == got:
             return True
     return False
 
@@ -80,7 +74,7 @@ class NodeState:
 
 
 class EchoGrid:
-    def __init__(self, secret: str = "", cmd_port: int = CMD_PORT):
+    def __init__(self, secret: str = DEFAULT_SECRET, cmd_port: int = CMD_PORT):
         self.secret = secret
         self.cmd_port = cmd_port
         self.nodes: Dict[str, NodeState] = {}
@@ -94,11 +88,7 @@ class EchoGrid:
         self.sock.settimeout(0.25)
         self.cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        print(f"[EchoGrid] listening CSI UDP :{CSI_PORT}")
-        if secret:
-            print("[EchoGrid] auth REQUIRED (ECHO_SECRET set)")
-        else:
-            print("[EchoGrid] auth optional (set --secret or ECHO_SECRET)")
+        print(f"[EchoGrid] CSI UDP :{CSI_PORT}  auth={'on' if secret else 'off'}")
 
     def ingest(self, pkt: dict, addr: Tuple[str, int]) -> None:
         if pkt.get("type") != "wifi_csi":
@@ -133,13 +123,8 @@ class EchoGrid:
         nodes = self.live_nodes()
         if not nodes:
             return {
-                "entropy": 0.0,
-                "tracks": 0,
-                "motion": 0.0,
-                "df_max": 0.0,
-                "nodes": 0,
-                "bands": 0,
-                "agreed": False,
+                "entropy": 0.0, "tracks": 0, "motion": 0.0, "df_max": 0.0,
+                "nodes": 0, "bands": 0, "agreed": False,
             }
         acts = [n.activity for n in nodes]
         movs = [n.movement for n in nodes]
@@ -162,10 +147,9 @@ class EchoGrid:
 
     def send_echo_cmd(self, cmd: dict) -> None:
         if self.secret:
-            # host-side tag uses wall clock ms
             cmd["auth"] = auth_tag(self.secret, "host", int(time.time() * 1000))
+            cmd["timestamp"] = int(time.time() * 1000)
         payload = json.dumps(cmd).encode("utf-8")
-        # broadcast + unicast to known node addrs
         self.cmd_sock.sendto(payload, ("255.255.255.255", self.cmd_port))
         seen = set()
         for n in self.live_nodes(8.0):
@@ -179,26 +163,25 @@ class EchoGrid:
     def closed_loop_tick(self) -> None:
         fs = self.field_stats()
         self.send_echo_cmd({"type": "echo_cmd", "cmd": "field", **fs})
-        # boost active scenes, quiet idle
         if fs["motion"] > 0.45 or fs["tracks"] >= 2:
-            self.send_echo_cmd(
-                {"type": "echo_cmd", "cmd": "boost", "level": min(1.0, 0.4 + fs["motion"])}
-            )
+            self.send_echo_cmd({
+                "type": "echo_cmd", "cmd": "boost",
+                "level": min(1.0, 0.4 + fs["motion"]),
+            })
         elif fs["nodes"] > 0 and fs["motion"] < 0.12:
             self.send_echo_cmd({"type": "echo_cmd", "cmd": "quiet"})
 
     def render(self) -> str:
         nodes = self.live_nodes(6.0)
         fs = self.field_stats()
-        lines = []
-        lines.append("=" * 64)
-        lines.append("  ECHO GRID  —  closed-loop CSI")
-        lines.append(
+        lines = [
+            "=" * 64,
+            "  ECHO GRID  —  closed-loop CSI (auth on)",
             f"  nodes={fs['nodes']}  tracks={fs['tracks']}  "
             f"motion={fs['motion']:.2f}  H={fs['entropy']:.2f}  "
-            f"agreed={fs['agreed']}  ok={self.accepted} rej={self.rejected}"
-        )
-        lines.append("=" * 64)
+            f"agreed={fs['agreed']}  ok={self.accepted} rej={self.rejected}",
+            "=" * 64,
+        ]
         if not nodes:
             lines.append("  (waiting for wifi_csi on UDP 4210…)")
         for n in sorted(nodes, key=lambda x: x.node):
@@ -210,17 +193,10 @@ class EchoGrid:
             )
             lines.append(f"    activity  [{bar_a}] {n.activity:.2f}")
             lines.append(f"    movement  [{bar_m}] {n.movement:.2f}")
-            # mini CSI sparkline
-            spark = ""
-            for v in n.csi[::2]:
-                if v > 0.7:
-                    spark += "█"
-                elif v > 0.45:
-                    spark += "▓"
-                elif v > 0.25:
-                    spark += "▒"
-                else:
-                    spark += "░"
+            spark = "".join(
+                "█" if v > 0.7 else "▓" if v > 0.45 else "▒" if v > 0.25 else "░"
+                for v in n.csi[::2]
+            )
             lines.append(f"    csi       {spark}")
         lines.append("=" * 64)
         return "\n".join(lines)
@@ -244,15 +220,17 @@ class EchoGrid:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Echo Grid closed-loop CSI dashboard")
     ap.add_argument("--csi", action="store_true", help="CSI mode (UDP 4210)")
-    ap.add_argument("--secret", default=os.environ.get("ECHO_SECRET", ""),
-                    help="Shared auth secret (or env ECHO_SECRET)")
-    ap.add_argument("--loop-hz", type=float, default=2.0, help="Closed-loop feedback rate")
-    ap.add_argument("--no-loop", action="store_true", help="Visualize only, no echo_cmd")
+    ap.add_argument(
+        "--secret",
+        default=os.environ.get("ECHO_SECRET", DEFAULT_SECRET),
+        help="Shared auth secret (default matches firmware)",
+    )
+    ap.add_argument("--loop-hz", type=float, default=2.0)
+    ap.add_argument("--no-loop", action="store_true")
     args = ap.parse_args()
 
     if not args.csi:
         print("Use: python visualization/dashboard.py --csi")
-        print("Optional: --secret SHARED  or  export ECHO_SECRET=...")
         sys.exit(0)
 
     grid = EchoGrid(secret=args.secret)
@@ -269,7 +247,6 @@ def main() -> None:
                 grid.closed_loop_tick()
                 last_loop = now
             if now - last_render >= 0.5:
-                # clear-ish terminal refresh
                 sys.stdout.write("\033[2J\033[H")
                 sys.stdout.write(grid.render() + "\n")
                 sys.stdout.flush()
