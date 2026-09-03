@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-Echo Grid — closed-loop CSI dashboard
-
-  python visualization/dashboard.py --csi
-
-Listens UDP :4210, visualizes nodes, sends echo_cmd on :4211.
-Auth secret is baked in to match firmware (override with --secret / ECHO_SECRET).
-"""
+"""Echo Grid — closed-loop CSI dashboard. Also feeds MetaField jsonl."""
 from __future__ import annotations
 
 import argparse
@@ -22,9 +15,19 @@ from typing import Dict, List, Optional, Tuple
 
 CSI_PORT = 4210
 CMD_PORT = 4211
-
-# Must match esp32/include/echo_secret.h
 DEFAULT_SECRET = "Eg7$kQ2mN9pR4vX8wL3hJ6cF1bA5yU0zT"
+JSONL = os.environ.get("METAFIELD_CSI_JSONL", "/tmp/metafield/csi.jsonl")
+
+
+def local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 def auth_tag(secret: str, node: str, ts: int, bucket_ms: int = 60000) -> str:
@@ -51,12 +54,34 @@ def auth_ok(secret: str, pkt: dict) -> bool:
         expect = auth_tag(secret, node, ts + skew * 60000)
         if expect == got:
             return True
-    # wall-clock fallback for mixed timestamp domains
     now_ms = int(time.time() * 1000)
     for skew in (0, -1, 1):
         if auth_tag(secret, node, now_ms + skew * 60000) == got:
             return True
     return False
+
+
+def tee_jsonl(pkt: dict) -> None:
+    node = str(pkt.get("node") or pkt.get("body_id") or "csi-unknown")
+    rec = {
+        "type": "wifi_csi",
+        "node": node,
+        "body_id": node,
+        "body_type": "wifi_csi",
+        "rssi": pkt.get("rssi", -90),
+        "csi": pkt.get("csi", []),
+        "timestamp": pkt.get("timestamp", time.time()),
+        "source_class": "physical",
+        "synthetic": False,
+        "channel": pkt.get("channel"),
+        "via": pkt.get("via", "udp"),
+    }
+    try:
+        os.makedirs(os.path.dirname(JSONL) or ".", exist_ok=True)
+        with open(JSONL, "a", buffering=1) as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
 
 
 @dataclass
@@ -81,6 +106,7 @@ class EchoGrid:
         self.history: deque = deque(maxlen=120)
         self.rejected = 0
         self.accepted = 0
+        self.host_ip = local_ip()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -88,7 +114,7 @@ class EchoGrid:
         self.sock.settimeout(0.25)
         self.cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        print(f"[EchoGrid] CSI UDP :{CSI_PORT}  auth={'on' if secret else 'off'}")
+        print(f"[EchoGrid] CSI UDP :{CSI_PORT}  host={self.host_ip}  jsonl={JSONL}")
 
     def ingest(self, pkt: dict, addr: Tuple[str, int]) -> None:
         if pkt.get("type") != "wifi_csi":
@@ -97,6 +123,7 @@ class EchoGrid:
             self.rejected += 1
             return
         self.accepted += 1
+        tee_jsonl(pkt)
         node = str(pkt.get("node", "unknown"))
         st = self.nodes.get(node) or NodeState(node=node)
         st.last_seen = time.time()
@@ -122,10 +149,8 @@ class EchoGrid:
     def field_stats(self) -> dict:
         nodes = self.live_nodes()
         if not nodes:
-            return {
-                "entropy": 0.0, "tracks": 0, "motion": 0.0, "df_max": 0.0,
-                "nodes": 0, "bands": 0, "agreed": False,
-            }
+            return {"entropy": 0.0, "tracks": 0, "motion": 0.0, "df_max": 0.0,
+                    "nodes": 0, "bands": 0, "agreed": False}
         acts = [n.activity for n in nodes]
         movs = [n.movement for n in nodes]
         mean = sum(acts) / len(acts)
@@ -135,15 +160,9 @@ class EchoGrid:
         motion = max(movs) if movs else 0.0
         channels = {n.channel for n in nodes if n.channel}
         agreed = len(nodes) >= 2 and (max(acts) - min(acts) < 0.35)
-        return {
-            "entropy": round(entropy, 3),
-            "tracks": tracks,
-            "motion": round(motion, 3),
-            "df_max": round(motion * 40.0, 1),
-            "nodes": len(nodes),
-            "bands": len(channels) or 1,
-            "agreed": agreed,
-        }
+        return {"entropy": round(entropy, 3), "tracks": tracks, "motion": round(motion, 3),
+                "df_max": round(motion * 40.0, 1), "nodes": len(nodes),
+                "bands": len(channels) or 1, "agreed": agreed}
 
     def send_echo_cmd(self, cmd: dict) -> None:
         if self.secret:
@@ -160,44 +179,32 @@ class EchoGrid:
                 except OSError:
                     pass
 
+    def announce_host(self) -> None:
+        self.send_echo_cmd({"type": "metafield_host", "cmd": "host", "ip": self.host_ip})
+
     def closed_loop_tick(self) -> None:
+        self.announce_host()
         fs = self.field_stats()
         self.send_echo_cmd({"type": "echo_cmd", "cmd": "field", **fs})
         if fs["motion"] > 0.45 or fs["tracks"] >= 2:
-            self.send_echo_cmd({
-                "type": "echo_cmd", "cmd": "boost",
-                "level": min(1.0, 0.4 + fs["motion"]),
-            })
+            self.send_echo_cmd({"type": "echo_cmd", "cmd": "boost",
+                                "level": min(1.0, 0.4 + fs["motion"])})
         elif fs["nodes"] > 0 and fs["motion"] < 0.12:
             self.send_echo_cmd({"type": "echo_cmd", "cmd": "quiet"})
 
     def render(self) -> str:
         nodes = self.live_nodes(6.0)
         fs = self.field_stats()
-        lines = [
-            "=" * 64,
-            "  ECHO GRID  —  closed-loop CSI (auth on)",
-            f"  nodes={fs['nodes']}  tracks={fs['tracks']}  "
-            f"motion={fs['motion']:.2f}  H={fs['entropy']:.2f}  "
-            f"agreed={fs['agreed']}  ok={self.accepted} rej={self.rejected}",
-            "=" * 64,
-        ]
+        lines = ["=" * 64,
+                 "  ECHO GRID  —  closed-loop CSI",
+                 f"  nodes={fs['nodes']} tracks={fs['tracks']} motion={fs['motion']:.2f} "
+                 f"ok={self.accepted} rej={self.rejected} jsonl={JSONL}",
+                 "=" * 64]
         if not nodes:
             lines.append("  (waiting for wifi_csi on UDP 4210…)")
+            lines.append(f"  host announce {self.host_ip} → udp {CMD_PORT}")
         for n in sorted(nodes, key=lambda x: x.node):
-            bar_a = "█" * int(n.activity * 20) + "░" * (20 - int(n.activity * 20))
-            bar_m = "█" * int(n.movement * 20) + "░" * (20 - int(n.movement * 20))
-            lines.append(
-                f"  {n.node:14s} rssi={n.rssi:4.0f} ch={n.channel:2d} "
-                f"via={n.via:6s} pkts={n.packets}"
-            )
-            lines.append(f"    activity  [{bar_a}] {n.activity:.2f}")
-            lines.append(f"    movement  [{bar_m}] {n.movement:.2f}")
-            spark = "".join(
-                "█" if v > 0.7 else "▓" if v > 0.45 else "▒" if v > 0.25 else "░"
-                for v in n.csi[::2]
-            )
-            lines.append(f"    csi       {spark}")
+            lines.append(f"  {n.node:14s} rssi={n.rssi:4.0f} ch={n.channel:2d} via={n.via} pkts={n.packets}")
         lines.append("=" * 64)
         return "\n".join(lines)
 
@@ -218,26 +225,19 @@ class EchoGrid:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Echo Grid closed-loop CSI dashboard")
-    ap.add_argument("--csi", action="store_true", help="CSI mode (UDP 4210)")
-    ap.add_argument(
-        "--secret",
-        default=os.environ.get("ECHO_SECRET", DEFAULT_SECRET),
-        help="Shared auth secret (default matches firmware)",
-    )
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csi", action="store_true")
+    ap.add_argument("--secret", default=os.environ.get("ECHO_SECRET", DEFAULT_SECRET))
     ap.add_argument("--loop-hz", type=float, default=2.0)
     ap.add_argument("--no-loop", action="store_true")
     args = ap.parse_args()
-
     if not args.csi:
         print("Use: python visualization/dashboard.py --csi")
         sys.exit(0)
-
     grid = EchoGrid(secret=args.secret)
     last_render = 0.0
     last_loop = 0.0
     loop_period = 1.0 / max(args.loop_hz, 0.2)
-
     print("[EchoGrid] running — Ctrl+C to stop")
     try:
         while True:
