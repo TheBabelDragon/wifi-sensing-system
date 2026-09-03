@@ -1,37 +1,33 @@
-# ESP32 CSI nodes (secured + ESP-NOW + closed loop)
+# ESP32 CSI nodes
 
-## Baked-in credentials (download & flash)
+The CYD does not find MetaField by magic. Path:
 
-| Item | Value |
-|------|--------|
-| Shared secret | `Eg7$kQ2mN9pR4vX8wL3hJ6cF1bA5yU0zT` |
-| Portal password | `Eg7kQ2mN9p` |
-| Node ID | MAC-based `csi-A1B2C3` / `cyd-A1B2C3` |
-
-Firmware and `visualization/dashboard.py` already share this secret. No extra config required.
-
-## Flash
-
-```bash
-cd esp32 && git pull
-./flash.sh --standard -p /dev/ttyUSB0 -e --monitor
-./flash.sh --cyd -p /dev/ttyUSB1 -e --monitor
+```
+CYD  --UDP 4210 broadcast/unicast-->  host csi-bridge / dashboard.py
+                                         |
+                                         v
+                               /tmp/metafield/csi.jsonl
+                                         |
+                                         v
+                                    hello_view
 ```
 
-Phone: join **`CSI-<id>`**, password **`Eg7kQ2mN9p`**, set house WiFi.
+If the CYD screen says **LOC**, it is offline ESP-NOW only. No UDP reaches the PC.
+Join house WiFi via portal `CSI-cyd-…` / `Eg7kQ2mN9p`.
 
-## Echo Grid
+Host must listen:
 
 ```bash
+python3 metafield-engine/scripts/csi-bridge.py
+# or
 python visualization/dashboard.py --csi
 ```
 
-## What security is on
+Do not run both. They both bind 4210.
 
-- WPA2 portal (not open)
-- Packet auth tags on UDP + ESP-NOW
-- Command auth on boost/rate/quiet
-- ESP-NOW PMK derived from secret
-- Unique per-board IDs
+After flashing `cyd-discover` firmware: serial line `CSIJSON {…}` every packet,
+and `host 192.168.x.x` pins unicast. Host announces `metafield_host` on UDP 4211.
 
-Rotate later with `-DECHO_SECRET=...` / `-DECHO_PORTAL_PASS=...` if this repo is public and you need a private swarm key.
+```bash
+cd esp32 && ./flash.sh --cyd -p /dev/ttyACM0 -e --monitor
+```
